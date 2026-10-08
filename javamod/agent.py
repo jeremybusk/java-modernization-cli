@@ -50,8 +50,8 @@ AGENTS = {
                       ("exec", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"),
                       None),
     "copilot": AgentCli("copilot", ".github/skills", ("--allow-all-tools",), "-p"),
-    # Microsoft's GitHub Copilot modernization agent. It's Copilot-CLI-only and
-    # its license forbids repackaging, so install it yourself first:
+    # Microsoft's GitHub Copilot modernization agent. The user installs
+    # this optional Copilot CLI plugin separately:
     #   copilot plugin marketplace add microsoft/modernize-java
     #   copilot plugin install modernize-java@modernize-java
     "copilot-modernize-java": AgentCli("copilot", ".github/skills",

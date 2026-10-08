@@ -183,19 +183,28 @@ Details, guardrails, and how to add a built-in skill: [docs/agent-stage-and-skil
 
 `--agent copilot-modernize-java` runs Microsoft's
 [modernize-java](https://github.com/microsoft/modernize-java) Copilot agent
-instead. It is Copilot-CLI-only, pulls a proprietary MCP server via `npx`,
-sends telemetry, and its license forbids repackaging, so javamod doesn't
-install it; do that once yourself:
+instead. This integration requires the Copilot CLI, and the upstream README
+documents telemetry. The repository is
+[MIT-licensed](https://github.com/microsoft/modernize-java/blob/main/LICENSE);
+that does not establish the license of separately distributed runtime tools.
+javamod invokes your existing Copilot installation and does not install this
+optional plugin; do that once yourself:
 
 ```bash
 copilot plugin marketplace add microsoft/modernize-java
 copilot plugin install modernize-java@modernize-java
 ```
 
-Guardrails: the agent gets edit rights in the clone only (Claude Code is
-limited to edits plus the build tool and read-only git; Codex runs in its
-`workspace-write` sandbox; Copilot gets `--allow-all-tools`). Any commit it
-makes is folded back into javamod's single commit. The skills it was given
+Microsoft's broader
+[github-copilot-modernization](https://github.com/microsoft/github-copilot-modernization)
+plugin also covers .NET, Azure migration, and architecture changes. It is
+an optional alternative; javamod keeps the Java-focused preset. See the
+[comparison and experimental passthrough example](docs/agent-stage-and-skills.md#microsoft-github-copilot-modernization).
+
+The agent runs in the clone. Claude Code's allowed tools cover edits, the
+build tool, and read-only git; Codex runs in its `workspace-write` sandbox.
+Copilot gets `--allow-all-tools`, which does not confine its commands to the
+clone. Any commit it makes is folded back into javamod's single commit. The skills it was given
 are kept out of that commit. javamod's own build check, not the agent's
 summary, still decides whether the branch can be pushed. The full transcript
 is saved and its path printed in the summary.
