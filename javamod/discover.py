@@ -19,6 +19,7 @@ from pathlib import Path
 from .errors import ModError
 
 IGNORED_DIRS = {".git", "target", "build", ".gradle", "node_modules", "vendor"}
+BUILD_FILES = {"maven": ("pom.xml",), "gradle": ("build.gradle", "build.gradle.kts")}
 
 # Coordinates that flag a feature worth tailoring the recipe plan around.
 FEATURE_MARKERS = {
@@ -48,41 +49,43 @@ class BuildRoot:
     spring_boot: str | None = None
     features: set[str] = dataclasses.field(default_factory=set)
     dependencies: list[Dependency] = dataclasses.field(default_factory=list)
+    warnings: list[str] = dataclasses.field(default_factory=list)
 
 
-def find_build_root(repo: Path, relative: str | None, max_depth: int = 2) -> BuildRoot:
+def find_build_root(repo: Path, relative: str | None, max_depth: int = 2, *, build_tool: str = "auto") -> BuildRoot:
     """Return the one build to migrate.
 
     *relative*, if given, pins the build root explicitly (for monorepos).
     Otherwise this looks at the repo root first, then one/two levels down,
     and fails loudly if zero or several independent roots are found there --
-    ambiguity should be resolved by the caller with ``--build-root``, not
-    guessed at.
+    pick a directory with ``--build-root``. If that directory contains both
+    Maven and Gradle files, select the tool with ``--build-tool``.
     """
     if relative:
         candidate = (repo / relative).resolve()
         if not candidate.is_relative_to(repo.resolve()):
             raise ModError("--build-root must stay within the source repository")
-        tool = _tool_at(candidate)
+        tool = _tool_at(candidate, build_tool)
         if not tool:
             raise ModError(f"no pom.xml or build.gradle[.kts] at --build-root {relative}")
         return _analyze(candidate, tool)
 
-    direct = _tool_at(repo)
-    if direct:
-        return _analyze(repo, direct)
+    if _build_files(repo):
+        tool = _tool_at(repo, build_tool)
+        assert tool
+        return _analyze(repo, tool)
 
     found: list[Path] = []
     for depth in range(1, max_depth + 1):
         for candidate in _dirs_at_depth(repo, depth):
-            if not any(candidate.is_relative_to(root) for root in found) and _tool_at(candidate):
+            if not any(candidate.is_relative_to(root) for root in found) and _build_files(candidate):
                 found.append(candidate)
     if not found:
         raise ModError(f"no Maven or Gradle build found under {repo} (searched {max_depth} levels deep)")
     if len(found) > 1:
         names = ", ".join(str(p.relative_to(repo)) for p in found)
         raise ModError(f"multiple independent builds found ({names}); pick one with --build-root")
-    tool = _tool_at(found[0])
+    tool = _tool_at(found[0], build_tool)
     assert tool
     return _analyze(found[0], tool)
 
@@ -100,12 +103,24 @@ def _dirs_at_depth(root: Path, depth: int) -> list[Path]:
     return level
 
 
-def _tool_at(path: Path) -> str | None:
-    if (path / "pom.xml").is_file():
-        return "maven"
-    if (path / "build.gradle").is_file() or (path / "build.gradle.kts").is_file():
-        return "gradle"
-    return None
+def _build_files(path: Path) -> dict[str, list[str]]:
+    files = {tool: [name for name in names if (path / name).is_file()] for tool, names in BUILD_FILES.items()}
+    return {tool: names for tool, names in files.items() if names}
+
+
+def _tool_at(path: Path, preferred: str = "auto") -> str | None:
+    files = _build_files(path)
+    if not files:
+        return None
+    if preferred != "auto":
+        if preferred not in files:
+            found = ", ".join(name for names in files.values() for name in names)
+            raise ModError(f"no {preferred} build file at {path}; found {found}")
+        return preferred
+    if len(files) > 1:
+        raise ModError(f"both Maven and Gradle build files found at {path}; select --build-tool maven or "
+                       "--build-tool gradle. File presence cannot establish which build is active or obsolete")
+    return next(iter(files))
 
 
 # Imports that show a feature is in use even when the dependency arrives
@@ -183,6 +198,10 @@ def _import_features(dirs: list[Path]) -> set[str]:
 
 def _analyze(path: Path, tool: str) -> BuildRoot:
     build = BuildRoot(path=path, tool=tool)
+    alternatives = [name for other, names in _build_files(path).items() if other != tool for name in names]
+    if alternatives:
+        build.warnings.append(f"using {tool}; also found {', '.join(alternatives)}. "
+                              "Check CI and build scripts before treating alternate build files as obsolete")
     dirs = _module_dirs(path, tool)
     read_deps = _maven_dependencies if tool == "maven" else _gradle_dependencies
     root_properties = _maven_properties(path) if tool == "maven" else {}

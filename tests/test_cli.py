@@ -328,6 +328,29 @@ class AutomationRegressionTests(unittest.TestCase):
         self.assertIn("source:", diagnostics)
         self.assertEqual(payload["local_checkout"], str(self.workdir / "src"))
 
+    def test_mixed_builds_fail_before_recipes_run(self):
+        (self.source / "build.gradle").write_text("plugins { id 'java' }")
+        from javamod import gitrepo
+        gitrepo.commit_all(self.source, "add Gradle build")
+        stderr = io.StringIO()
+        with mock.patch("javamod.openrewrite.run") as rewrite, contextlib.redirect_stderr(stderr):
+            code = cli.main(["migrate", "--source", str(self.source), "--dest-branch", "b",
+                             "--local-only", "--workdir", str(self.workdir)])
+        self.assertEqual(code, 2)
+        self.assertIn("--build-tool gradle", stderr.getvalue())
+        rewrite.assert_not_called()
+
+    def test_selected_gradle_reports_alternate_pom_even_when_quiet(self):
+        (self.source / "build.gradle").write_text("plugins { id 'java' }")
+        (self.source / "pom.xml").write_text("invalid alternate POM")
+        from javamod import gitrepo
+        gitrepo.commit_all(self.source, "add Gradle build")
+        code, payload, _ = self.migrate("--build-tool", "gradle", "--quiet")
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["build_tool"], "gradle")
+        self.assertIn("pom.xml", payload["build_warnings"][0])
+        self.assertEqual((self.workdir / "src/pom.xml").read_text(), "invalid alternate POM")
+
     def test_successful_temporary_local_checkout_is_retained(self):
         with mock.patch("javamod.cli.tempfile.mkdtemp", return_value=str(self.workdir)):
             code, payload, _ = self.migrate(temporary=True)
@@ -431,7 +454,8 @@ class AutomationRegressionTests(unittest.TestCase):
 
     def test_invalid_env_defaults_fail_before_cloning(self):
         for variable, value in (("JAVAMOD_JAVA", "abc"), ("JAVAMOD_JAVA", "99"),
-                                ("JAVAMOD_ENGINE", "unknown"), ("JAVAMOD_ALLOW_CODEGENOME", "maybe")):
+                                ("JAVAMOD_ENGINE", "unknown"), ("JAVAMOD_ALLOW_CODEGENOME", "maybe"),
+                                ("JAVAMOD_BUILD_TOOL", "unknown")):
             with self.subTest(variable=variable, value=value), \
                     mock.patch.dict("os.environ", {variable: value}), \
                     mock.patch("javamod.gitrepo.clone_source") as clone, \

@@ -50,6 +50,7 @@ class RunReport:
     agent_log: str | None = None
     local_checkout: str | None = None
     error: str | None = None
+    build_warnings: list[str] = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self) | {"generated_at": dt.datetime.now(dt.timezone.utc).isoformat()}

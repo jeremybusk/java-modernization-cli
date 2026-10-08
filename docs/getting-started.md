@@ -53,6 +53,9 @@ Gradle for your project's build tool.
    ```
 
    The migrated checkout is retained locally, and its path is printed.
+   If both Maven and Gradle build files exist, add `--build-tool gradle`
+   or `--build-tool maven` to select the one your project uses. Alternate
+   build files are reported for review and retained.
    See the [README](../README.md#command-reference) for Spring Boot targets,
    agents, and publishing the result.
 

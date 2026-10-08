@@ -63,6 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
                           required=env_default("JAVAMOD_DEST_BRANCH", None) is None,
                           help="branch to create/update, locally and (unless --local-only) at --dest")
     migrate.add_argument("--build-root", default=None, help="path within the source to the Maven/Gradle build, for monorepos")
+    migrate.add_argument("--build-tool", choices=("auto", *discover.BUILD_FILES),
+                          default=env_default("JAVAMOD_BUILD_TOOL", "auto"),
+                          help="select Maven or Gradle; auto requires an explicit choice when both are present")
 
     migrate.add_argument("--java", type=int, default=env_default("JAVAMOD_JAVA", 21, int),
                           choices=recipes.TARGET_JAVA_VERSIONS, help="target Java version (default: %(default)s)")
@@ -195,7 +198,10 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         )
 
         base_rev = gitrepo.capture(["git", "rev-parse", "HEAD"], src_path)
-        build = discover.find_build_root(src_path, args.build_root)
+        build = discover.find_build_root(src_path, args.build_root, build_tool=args.build_tool)
+        if not args.quiet:
+            for warning in build.warnings:
+                print(f"warning: {warning}", file=sys.stderr)
         log(f"{build.tool} build at {build.path.relative_to(src_path)}"
             f" (current Java: {build.current_java or 'unknown'}, features: {sorted(build.features) or 'none detected'})")
         gitrepo.ignore_build_outputs(src_path, build.path, build.tool)
@@ -312,6 +318,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             commit=commit, branch=branch,
             destination=args.dest, pushed=False, residual_issues=residual_issues,
             build_log=str(build_log) if build_log else None, skipped_tests=skip_tests,
+            build_warnings=build.warnings,
             agent=args.agent, agent_ok=all(agent_passes) if agent_passes else None,
             agent_passes=len(agent_passes), agent_skills=agent_skills,
             agent_log=str(agent_log) if agent_log else None,
@@ -360,6 +367,7 @@ def _validate_migrate(args: argparse.Namespace) -> None:
         "dependency_strategy": ("patch", "latest"), "recipe_source": recipes.PLUGIN_VERSIONS,
         "engine": ("openrewrite", "hybrid", "ai"), "agent": agent.AGENTS,
         "agent_on": ("always", "failure"), "provider": ("github", "gitlab"),
+        "build_tool": ("auto", *discover.BUILD_FILES),
     }
     for name, allowed in choices.items():
         value = getattr(args, name)
