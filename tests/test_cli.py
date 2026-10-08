@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import subprocess
 import tempfile
 import unittest
@@ -130,6 +131,33 @@ class BuildFailureDiagnosticsTests(unittest.TestCase):
             issues_file = workdir / "remaining-issues.yaml"
             self.assertTrue(issues_file.is_file())
             self.assertIn("renamed-api", issues_file.read_text(encoding="utf-8"))
+
+    @mock.patch("javamod.buildcheck.validate")
+    @mock.patch("javamod.openrewrite.run", return_value=True)
+    def test_report_is_still_written_when_execute_blocks_on_a_failed_build(self, _mock_rewrite, mock_validate):
+        # The exact bug reported: --report - produced nothing on a build
+        # failure that blocked the push, even though the whole point of
+        # --report is for a CI consumer to see build_ok/residual_issues
+        # precisely when the build failed.
+        mock_validate.return_value = mock.Mock(
+            ok=False, output="[ERROR] /app/Service.java:[1,1] cannot find symbol\n"
+                             "[ERROR]   symbol:   method findOne(long)\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            source = make_source_repo(Path(tmp))
+            dest = Path(tmp) / "dest.git"
+            from javamod import gitrepo
+            gitrepo.init_bare_destination(dest)
+            report_path = Path(tmp) / "report.json"
+            code = cli.main([
+                "migrate", "--source", str(source), "--dest", str(dest), "--dest-branch", "modernize-java21",
+                "--execute", "--yes", "--java", "21", "--report", str(report_path),
+            ])
+            self.assertEqual(code, 2)
+            self.assertTrue(report_path.is_file())
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertFalse(payload["build_ok"])
+            self.assertFalse(payload["pushed"])
+            self.assertTrue(any(i["category"] == "renamed-api" for i in payload["residual_issues"]))
 
 
 class BootCrossMajorJumpCliTests(unittest.TestCase):

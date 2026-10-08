@@ -210,7 +210,24 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             triage.write(residual_issues, issues_destination)
             if not args.quiet and issues_destination != "-":
                 print(f"\nfull triage written to {issues_destination}")
+        # Built now, before any raise below, so --report still gets written on
+        # a failure that blocks the push -- that's precisely when a CI
+        # consumer most needs the structured build_ok/residual_issues fields,
+        # not only on success.
+        report = RunReport(
+            source=source, source_ref=ref, build_tool=build.tool,
+            build_root=str(build.path.relative_to(src_path)), target_java=args.java,
+            boot_target=args.boot, profile=args.profile, engine=args.engine, recipes=plan.recipe_names,
+            changed=changed, diff_stat=diff_stat, build_ok=build_ok,
+            build_output_tail=build_result.output if build_result else "", commit=commit, branch=branch,
+            destination=args.dest, pushed=False, residual_issues=residual_issues,
+        )
+
         if build_ok is False and args.execute and not args.force_push:
+            if not args.quiet:
+                report.print_summary()
+            if args.report:
+                report.write_json(args.report)
             raise ModError("build/tests failed after migration; not pushing (use --force-push to push anyway)")
 
         pushed = False
@@ -222,15 +239,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             log(f"pushing {branch} -> {args.dest}")
             gitrepo.push(src_path, branch, args.dest, token_env=push_token_env, force=args.force_push)
             pushed = True
+        report.pushed = pushed
 
-        report = RunReport(
-            source=source, source_ref=ref, build_tool=build.tool,
-            build_root=str(build.path.relative_to(src_path)), target_java=args.java,
-            boot_target=args.boot, profile=args.profile, engine=args.engine, recipes=plan.recipe_names,
-            changed=changed, diff_stat=diff_stat, build_ok=build_ok,
-            build_output_tail=build_result.output if build_result else "", commit=commit, branch=branch,
-            destination=args.dest, pushed=pushed, residual_issues=residual_issues,
-        )
         if not args.quiet:
             report.print_summary()
             if not pushed:
