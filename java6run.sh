@@ -1,4 +1,4 @@
-javadoc migrate \
+javamod migrate \
   --source git@github.com:jeremybusk/spring-boot-rest-example.git#master \
   --verbose \
   --dest   git@github.com:jeremybusk/spring-boot-rest-example.git \
