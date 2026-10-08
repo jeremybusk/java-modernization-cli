@@ -17,7 +17,7 @@ import tempfile
 import urllib.parse
 from pathlib import Path
 
-from . import agent, ai, buildcheck, discover, formatting, gitrepo, openrewrite, recipes, triage
+from . import agent, ai, buildcheck, discover, formatting, gitrepo, openrewrite, recipes, toolchain, triage
 from .envutil import env_default
 from .errors import ModError
 from .report import RunReport
@@ -147,29 +147,43 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation before pushing")
     migrate.add_argument("-v", "--verbose", action="store_true")
 
-    sub.add_parser("doctor", help="check that git/java/maven/gradle (and, if needed, the anthropic package) are available")
+    doctor = sub.add_parser("doctor", help="check tool versions and compatibility with the target JDK")
+    doctor.add_argument("--java", type=int, default=env_default("JAVAMOD_JAVA", 21, int),
+                        choices=recipes.TARGET_JAVA_VERSIONS, help="target Java version (default: %(default)s)")
+    doctor.add_argument("--build-tool", choices=("auto", *discover.BUILD_FILES),
+                        default=env_default("JAVAMOD_BUILD_TOOL", "auto"),
+                        help="require the selected system build tool; auto accepts either")
     return parser
 
 
-def cmd_doctor(_args: argparse.Namespace) -> int:
-    checks = [("git", "git"), ("java", "java"), ("javac", "javac"), ("mvn", "mvn"), ("gradle", "gradle"), ("gh", "gh")]
-    found = {name: shutil.which(binary) for name, binary in checks}
-    for name, path in found.items():
+def cmd_doctor(args: argparse.Namespace) -> int:
+    if args.java not in recipes.TARGET_JAVA_VERSIONS or args.build_tool not in ("auto", *discover.BUILD_FILES):
+        raise ModError("invalid doctor --java or --build-tool environment default")
+    runtime, _detail = toolchain.probe("java")
+    found = {}
+    for name in ("java", "javac", "mvn", "gradle"):
+        found[name], detail = toolchain.check(name, java=args.java, runtime=runtime[0] if runtime else args.java)
+        print(f"{'OK     ' if found[name] else 'FAIL   '} {name}  {detail}")
+    for name in ("git", "gh"):
+        path = shutil.which(name)
+        found[name] = bool(path)
         print(f"{'OK     ' if path else 'MISSING'} {name}" + (f"  ({path})" if path else ""))
     try:
         import anthropic  # noqa: F401
         print("OK      anthropic (python package, for --engine ai/hybrid)")
-        ai_ok = True
     except ImportError:
         print("MISSING anthropic (python package; only needed for --engine ai/hybrid): pip install anthropic")
-        ai_ok = True  # not required for the default engine
     for name in ("claude", "codex", "copilot"):
         path = shutil.which(name)
         print(f"{'OK     ' if path else 'MISSING'} {name} (optional, for --agent)" + (f"  ({path})" if path else ""))
-    ok = bool(found["git"] and found["java"] and found["javac"] and (found["mvn"] or found["gradle"])) and ai_ok
+    build_ok = ((found["mvn"] or found["gradle"]) if args.build_tool == "auto"
+                else found["mvn" if args.build_tool == "maven" else "gradle"])
+    ok = found["git"] and found["java"] and found["javac"] and build_ok
+    print("\nOpenRewrite uses system Maven/Gradle; validation prefers the project's wrapper.")
+    print("Wrapper versions and project plugin compatibility must also be checked in the source repository.")
     if not ok:
-        print("\nOn Ubuntu/Debian:\n  sudo apt-get update && sudo apt-get install -y git openjdk-21-jdk maven gradle")
-        print("\n(or open this repo in its devcontainer, which ships all of the above)")
+        print(f"\nOn Ubuntu/Debian, from the javamod checkout:\n  JAVAMOD_JAVA={args.java} ./scripts/bootstrap.sh")
+        print("  source .venv/bin/activate\n(or use this repo's devcontainer)")
     return 0 if ok else 1
 
 
