@@ -1,5 +1,8 @@
 # java-modernization-cli
 
+For clone, virtual environment, installation, and your first migration, see
+the [Getting started guide](docs/getting-started.md).
+
 `javamod` modernizes one Java repository and publishes the result to a
 destination repo:branch. Point it at a source (remote URL or local path,
 optionally at a specific ref) and a destination (remote URL or local path,
