@@ -15,7 +15,7 @@ import tempfile
 import urllib.parse
 from pathlib import Path
 
-from . import ai, buildcheck, discover, formatting, gitrepo, openrewrite, recipes
+from . import ai, buildcheck, discover, formatting, gitrepo, openrewrite, recipes, triage
 from .envutil import env_default
 from .errors import ModError
 from .report import RunReport
@@ -107,6 +107,9 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--workdir", type=Path, default=None, help="use this directory instead of a temp dir; kept after the run")
     migrate.add_argument("--keep", action="store_true", help="keep the temp workdir even on success")
     migrate.add_argument("--report", default=None, help="write the JSON run report here, or '-' for stdout (CI-friendly)")
+    migrate.add_argument("--issues", default=None,
+                          help="if the build still fails, write the residual-issue triage YAML here, or '-' for "
+                               "stdout; default: <workdir>/remaining-issues.yaml")
     migrate.add_argument("--quiet", action="store_true", help="suppress the human-readable summary (pairs with --report -)")
     migrate.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation before pushing")
     migrate.add_argument("-v", "--verbose", action="store_true")
@@ -191,6 +194,16 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         changed = commit is not None
         diff_stat = gitrepo.diff_stat_since(src_path, base_rev) if changed else ""
         build_ok = build_result.ok if build_result else None
+        residual_issues: list[dict] = []
+        if build_ok is False:
+            residual_issues = triage.parse_build_failures(build.tool, build_result.output)
+            if residual_issues:
+                if not args.quiet:
+                    triage.print_summary(residual_issues)
+                issues_destination = args.issues or str(workdir / "remaining-issues.yaml")
+                triage.write(residual_issues, issues_destination)
+                if not args.quiet and issues_destination != "-":
+                    print(f"\nfull triage written to {issues_destination}")
         if build_ok is False and args.execute and not args.force_push:
             raise ModError("build/tests failed after migration; not pushing (use --force-push to push anyway)")
 
@@ -210,7 +223,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             boot_target=args.boot, profile=args.profile, engine=args.engine, recipes=plan.recipe_names,
             changed=changed, diff_stat=diff_stat, build_ok=build_ok,
             build_output_tail=build_result.output if build_result else "", commit=commit, branch=branch,
-            destination=args.dest, pushed=pushed,
+            destination=args.dest, pushed=pushed, residual_issues=residual_issues,
         )
         if not args.quiet:
             report.print_summary()

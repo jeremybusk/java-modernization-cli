@@ -30,6 +30,7 @@ class RunReport:
     branch: str | None
     destination: str | None
     pushed: bool
+    residual_issues: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self) | {"generated_at": dt.datetime.now(dt.timezone.utc).isoformat()}
@@ -48,6 +49,8 @@ class RunReport:
             print(f"\nbuild/test:  {'passed' if self.build_ok else 'FAILED'}")
             if not self.build_ok:
                 print(self.build_output_tail[-2000:])
+                if self.residual_issues:
+                    print(f"\n({len(self.residual_issues)} residual issue(s) triaged above)")
         if self.commit:
             print(f"\ncommit:      {self.commit}  (branch {self.branch})")
         if self.destination:
