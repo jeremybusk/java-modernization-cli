@@ -161,7 +161,11 @@ javamod migrate \
   --source git@github.com:acme/legacy-app.git#main \
   --dest   git@github.com:acme/legacy-app.git \
   --dest-branch modernize-java21 \
+  --issues - \
+  --report - \
+  --verbose \
   --java 21 --boot 3.5 --profile aggressive --execute
+
 
 # Build recipes from the public OpenRewrite source repos instead of pulling
 # prebuilt jars, and finish with an AI pass if the build doesn't compile.
