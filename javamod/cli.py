@@ -15,7 +15,7 @@ import tempfile
 import urllib.parse
 from pathlib import Path
 
-from . import ai, buildcheck, discover, formatting, gitrepo, openrewrite, recipes, triage
+from . import agent, ai, buildcheck, discover, formatting, gitrepo, openrewrite, recipes, triage
 from .envutil import env_default
 from .errors import ModError
 from .report import RunReport
@@ -88,6 +88,20 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--ai-max-iterations", type=int, default=env_default("JAVAMOD_AI_MAX_ITERATIONS", 3, int))
     migrate.add_argument("--ai-max-files", type=int, default=env_default("JAVAMOD_AI_MAX_FILES", 40, int))
 
+    migrate.add_argument("--agent", default=env_default("JAVAMOD_AGENT", None), choices=sorted(agent.AGENTS),
+                          help="after the recipes, hand the clone to this coding-agent CLI to finish the upgrade "
+                               "(uses the CLI's own login; off by default)")
+    migrate.add_argument("--agent-skill", action="append",
+                          default=[s for s in env_default("JAVAMOD_AGENT_SKILLS", "").split(",") if s],
+                          help=f"Agent Skill to install for --agent, repeatable: one of {sorted(agent.BUILTIN_SKILLS)}, "
+                               "a local directory containing SKILL.md, or 'git-url#path/to/skill'")
+    migrate.add_argument("--agent-model", default=env_default("JAVAMOD_AGENT_MODEL", None),
+                          help="model passed to the agent CLI's --model (default: the CLI's own default)")
+    migrate.add_argument("--agent-arg", action="append", default=[],
+                          help="extra argument passed through to the agent CLI, repeatable (use --agent-arg=--flag)")
+    migrate.add_argument("--agent-timeout", type=int, default=env_default("JAVAMOD_AGENT_TIMEOUT", 3600, int),
+                          help="seconds before the agent run is stopped (default: %(default)s)")
+
     migrate.add_argument("--skip-build", action="store_true", help="skip compiling/testing the result")
     migrate.add_argument("--skip-format", action="store_true",
                           help="don't run the project's own formatter (spring-javaformat/Spotless) after migrating, "
@@ -130,6 +144,9 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     except ImportError:
         print("MISSING anthropic (python package; only needed for --engine ai/hybrid): pip install anthropic")
         ai_ok = True  # not required for the default engine
+    for name in ("claude", "codex", "copilot"):
+        path = shutil.which(name)
+        print(f"{'OK     ' if path else 'MISSING'} {name} (optional, for --agent)" + (f"  ({path})" if path else ""))
     ok = bool(found["git"] and found["java"] and found["javac"] and (found["mvn"] or found["gradle"])) and ai_ok
     if not ok:
         print("\nOn Ubuntu/Debian:\n  sudo apt-get update && sudo apt-get install -y git openjdk-21-jdk maven gradle")
@@ -177,6 +194,18 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             )
         if args.engine == "ai":
             ai.modernize_tree(build, target_java=args.java, model=args.ai_model, max_files=args.ai_max_files, log=log)
+        agent_result = None
+        if args.agent:
+            agent_result = agent.run(
+                build, src_path, plan.recipe_names if args.engine != "ai" else [], agent_name=args.agent,
+                skills=args.agent_skill, target_java=args.java, boot=args.boot, run_tests=not args.skip_tests,
+                model=args.agent_model, extra_args=args.agent_arg, timeout=args.agent_timeout,
+                workdir=workdir, log=log,
+                # Outlives a temp workdir that's deleted on success: the
+                # transcript is what you review an agent run by.
+                log_path=workdir / "agent-transcript.log" if persistent or args.keep
+                else Path(tempfile.mkstemp(prefix="javamod-agent-", suffix=".log")[1]),
+            )
         if not args.skip_format:
             formatting.reconcile(build, log=log)
 
@@ -221,6 +250,9 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             changed=changed, diff_stat=diff_stat, build_ok=build_ok,
             build_output_tail=build_result.output if build_result else "", commit=commit, branch=branch,
             destination=args.dest, pushed=False, residual_issues=residual_issues,
+            agent=args.agent, agent_ok=agent_result.ok if agent_result else None,
+            agent_skills=agent_result.skills if agent_result else [],
+            agent_log=str(agent_result.log_path) if agent_result else None,
         )
 
         if build_ok is False and args.execute and not args.force_push:
@@ -267,6 +299,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "migrate" and args.recipe_source == "codegenome" and not args.allow_codegenome:
         print("error: --recipe-source codegenome also requires --allow-codegenome", file=sys.stderr)
         return 2
+    if args.command == "migrate" and args.agent_skill and not args.agent:
+        print("error: --agent-skill needs --agent", file=sys.stderr)
+        return 2
+    if args.command == "migrate" and args.agent:
+        try:
+            agent.cli_for(args.agent)  # fail before cloning, not after the recipes
+        except ModError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if args.command == "migrate" and args.init_dest and args.dest and not gitrepo.is_remote(args.dest):
         gitrepo.init_bare_destination(Path(args.dest).expanduser().resolve())
     try:

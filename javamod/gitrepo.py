@@ -175,12 +175,17 @@ def ignore_build_outputs(repo: Path, build_root: Path, tool: str) -> None:
     relative = build_root.resolve().relative_to(repo.resolve()).as_posix()
     prefix = "" if relative == "." else relative + "/"
     names = ("target",) if tool == "maven" else ("build", ".gradle")
-    exclude = Path(capture(["git", "rev-parse", "--git-path", "info/exclude"], repo))
-    if not exclude.is_absolute():
-        exclude = repo / exclude
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    with exclude.open("a", encoding="utf-8") as stream:
-        stream.write("\n" + "\n".join(f"/{prefix}{name}/" for name in names) + "\n")
+    exclude(repo, [f"/{prefix}{name}/" for name in names])
+
+
+def exclude(repo: Path, patterns: list[str]) -> None:
+    """Append *patterns* to the clone's own .git/info/exclude, never its .gitignore."""
+    path = Path(capture(["git", "rev-parse", "--git-path", "info/exclude"], repo))
+    if not path.is_absolute():
+        path = repo / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write("\n" + "\n".join(patterns) + "\n")
 
 
 def init_bare_destination(path: Path) -> None:

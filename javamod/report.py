@@ -31,6 +31,10 @@ class RunReport:
     destination: str | None
     pushed: bool
     residual_issues: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    agent: str | None = None
+    agent_ok: bool | None = None
+    agent_skills: list[str] = dataclasses.field(default_factory=list)
+    agent_log: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self) | {"generated_at": dt.datetime.now(dt.timezone.utc).isoformat()}
@@ -42,6 +46,10 @@ class RunReport:
               + (f", Spring Boot {self.boot_target}" if self.boot_target else ""))
         print(f"profile:     {self.profile}   engine: {self.engine}")
         print(f"recipes:     {len(self.recipes)} applied" if self.recipes else "recipes:     none (ai-only engine)")
+        if self.agent:
+            print(f"agent:       {self.agent} ({'finished' if self.agent_ok else 'did NOT finish cleanly'})"
+                  + (f", skills: {', '.join(self.agent_skills)}" if self.agent_skills else "")
+                  + (f"\n             transcript: {self.agent_log}" if self.agent_log else ""))
         print(f"changed:     {'yes' if self.changed else 'no'}")
         if self.diff_stat:
             print("\n" + self.diff_stat)

@@ -111,6 +111,11 @@ and `ANTHROPIC_API_KEY` set.
 | `--recipe-source` | `JAVAMOD_RECIPE_SOURCE` | `maven-central` | `maven-central`, `source` (build from the public OpenRewrite repos), or `codegenome` (needs `--allow-codegenome`). |
 | `--engine` | `JAVAMOD_ENGINE` | `openrewrite` | `openrewrite`, `hybrid` (+ AI build-fix pass), or `ai` (AI only). |
 | `--ai-model` | `JAVAMOD_AI_MODEL` | `claude-sonnet-5` | Model for `hybrid`/`ai`. |
+| `--agent` | `JAVAMOD_AGENT` | *(off)* | Hand the clone to a coding-agent CLI after the recipes: `claude`, `codex`, `copilot`, or `copilot-modernize-java`. See [Coding-agent stage](#coding-agent-stage). |
+| `--agent-skill` | `JAVAMOD_AGENT_SKILLS` (comma-separated) | — | Agent Skill to install for `--agent`, repeatable: `modern-java`, `java-version-upgrade`, a local dir with `SKILL.md`, or `git-url#path/to/skill`. |
+| `--agent-model` | `JAVAMOD_AGENT_MODEL` | the CLI's default | Passed to the agent CLI's `--model`. |
+| `--agent-arg` | — | — | Extra argument for the agent CLI, repeatable (`--agent-arg=--flag`). |
+| `--agent-timeout` | `JAVAMOD_AGENT_TIMEOUT` | `3600` | Seconds before the agent run is stopped. |
 | `--skip-build` / `--skip-tests` | — | off | Skip compiling, or compile without running tests. |
 | `--skip-format` | — | off | Don't run the project's own formatter (spring-javaformat/Spotless) after migrating, even if detected. |
 | `--execute` | — | off (plan + local commit only) | Actually push to `--dest`. |
@@ -134,6 +139,55 @@ starts with `UpgradeSpringBoot_3_5`. A single `--boot 3.5` run against a
 Spring Boot 1.5 project reaches 3.5 in one pass -- verified directly against
 [openrewrite/rewrite-spring](https://github.com/openrewrite/rewrite-spring)'s
 recipe definitions and with a real migration run, not assumed.
+
+### Coding-agent stage
+
+`--agent` adds one optional stage between the recipes and the build check:
+javamod hands the working clone to a coding-agent CLI you already use and
+are logged in to, with a prompt built from what it detected (build tool,
+current/target Java and Boot, the recipes it just applied). The agent runs
+the build itself, fixes what fails, and handles what recipes don't cover.
+
+```bash
+# OpenRewrite first, then Claude Code finishes with the java.evolved skill.
+javamod migrate --source ./my-app --dest-branch modernize-java21 --local-only \
+  --agent claude --agent-skill modern-java --agent-skill java-version-upgrade
+```
+
+It differs from `--engine hybrid` (which calls the Anthropic API with a
+fixed prompt and needs `ANTHROPIC_API_KEY`) in that the agent explores and
+iterates on its own and can use **Agent Skills**: portable `SKILL.md`
+packages, installed into the clone where the chosen CLI looks for them
+(`.claude/skills/`, `.agents/skills/`, `.github/skills/`) and excluded from
+the commit. Two are built in, pinned to a reviewed commit:
+
+| Name | What it adds |
+| --- | --- |
+| `modern-java` | [java.evolved](https://github.com/brunoborges/javaevolved/tree/main/agent-plugins/modern-java-development)'s version-aware "idiomatic Java N" guidance (MIT). |
+| `java-version-upgrade` | [G10xy/java-version-upgrade-skill](https://github.com/G10xy/java-version-upgrade-skill): what breaks between LTS versions and how to fix it (Apache-2.0). |
+
+Any other skill works as a local directory or `https://host/repo.git#path/to/skill`.
+
+Details, guardrails, and how to add a built-in skill: [docs/agent-stage-and-skills.md](docs/agent-stage-and-skills.md).
+
+`--agent copilot-modernize-java` runs Microsoft's
+[modernize-java](https://github.com/microsoft/modernize-java) Copilot agent
+instead. It is Copilot-CLI-only, pulls a proprietary MCP server via `npx`,
+sends telemetry, and its license forbids repackaging, so javamod doesn't
+install it; do that once yourself:
+
+```bash
+copilot plugin marketplace add microsoft/modernize-java
+copilot plugin install modernize-java@modernize-java
+```
+
+Guardrails: the agent gets edit rights in the clone only (Claude Code is
+limited to edits plus the build tool and read-only git; Codex runs in its
+`workspace-write` sandbox; Copilot gets `--allow-all-tools`). Any commit it
+makes is folded back into javamod's single commit. The skills it was given
+are kept out of that commit. javamod's own build check, not the agent's
+summary, still decides whether the branch can be pushed. The full transcript
+is saved and its path printed in the summary.
 
 ### Using `javamod` in CI
 
@@ -195,6 +249,10 @@ javamod migrate --source ./svc-b --dest-branch modernize-java21 --local-only
 * [docs/formatting-reconciliation.md](docs/formatting-reconciliation.md) --
   why and how javamod re-applies a project's own formatter
   (spring-javaformat/Spotless) before validating.
+* [docs/agent-stage-and-skills.md](docs/agent-stage-and-skills.md) -- the
+  `--agent` stage in detail, the built-in Agent Skills, why Microsoft's
+  modernize-java isn't built in (and where it fits), and the requirements
+  for adding a new built-in skill.
 
 ## Tests
 

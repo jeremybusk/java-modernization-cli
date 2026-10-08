@@ -54,6 +54,21 @@ class MigrateArgumentValidationTests(unittest.TestCase):
             self.assertEqual(code, 2)
 
 
+class AgentArgumentValidationTests(unittest.TestCase):
+    def test_agent_skill_requires_agent(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["migrate", "--source", ".", "--dest-branch", "b", "--local-only",
+                             "--agent-skill", "modern-java"])
+        self.assertEqual(code, 2)
+
+    def test_missing_agent_cli_fails_before_cloning(self):
+        with mock.patch("shutil.which", return_value=None), mock.patch("javamod.gitrepo.clone_source") as clone:
+            with contextlib.redirect_stderr(io.StringIO()):
+                code = cli.main(["migrate", "--source", ".", "--dest-branch", "b", "--local-only", "--agent", "codex"])
+        self.assertEqual(code, 2)
+        clone.assert_not_called()
+
+
 class MigrateDryRunTests(unittest.TestCase):
     @mock.patch("javamod.openrewrite.run", return_value=True)
     def test_local_only_skip_build_run_succeeds_and_creates_branch(self, _mock_rewrite):
