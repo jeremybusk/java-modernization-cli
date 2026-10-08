@@ -157,6 +157,14 @@ class MavenPomValidationParsingTests(unittest.TestCase):
 
 
 class GradleParsingTests(unittest.TestCase):
+    def test_compile_paths_with_spaces_are_preserved(self):
+        for tool, output in (("gradle", "/my app/A.java:12: error: cannot find symbol"),
+                             ("maven", "[ERROR] /my app/A.java:[12,1] cannot find symbol")):
+            with self.subTest(tool=tool):
+                issues = triage.parse_build_failures(tool, output)
+                self.assertEqual(issues[0]["file"], "/my app/A.java")
+                self.assertEqual(issues[0]["lines"], [12])
+
     def test_gradle_error_format_is_parsed(self):
         issues = triage.parse_build_failures("gradle", GRADLE_OUTPUT)
         self.assertEqual(len(issues), 1)
@@ -173,6 +181,14 @@ class TestFailureParsingTests(unittest.TestCase):
 
 
 class YamlRenderingTests(unittest.TestCase):
+    def test_control_characters_are_escaped(self):
+        import json
+        value = "tab\tcarriage\rreturn\nnull\x00"
+        rendered = triage._yaml_scalar(value)
+        self.assertNotIn("\r", rendered)
+        self.assertNotIn("\x00", rendered)
+        self.assertEqual(json.loads(rendered), value)
+
     def test_empty_issue_list(self):
         self.assertEqual(triage.to_yaml([]), "issues: []\n")
 

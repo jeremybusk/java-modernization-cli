@@ -112,6 +112,41 @@ class SpringBootParentDetectionTests(unittest.TestCase):
 
 
 class BuildRootSelectionTests(unittest.TestCase):
+    def test_build_root_cannot_escape_via_parent_or_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            (outside / "pom.xml").write_text(MAVEN_POM)
+            (root / "link").symlink_to(outside, target_is_directory=True)
+            for relative in ("../outside", "link", str(outside)):
+                with self.subTest(relative=relative), self.assertRaisesRegex(ModError, "within"):
+                    discover.find_build_root(root, relative)
+
+    def test_independent_builds_at_different_depths_are_ambiguous(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for relative in ("app-a", "services/app-b"):
+                path = root / relative
+                path.mkdir(parents=True)
+                (path / "pom.xml").write_text(MAVEN_POM)
+            with self.assertRaisesRegex(ModError, "multiple independent"):
+                discover.find_build_root(root, None)
+
+    def test_source_scanner_prunes_generated_and_external_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            for relative in ("B.java", "A.java", "target/Generated.java", ".cache/Hidden.java"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("class A {}")
+            outside = Path(tmp) / "Outside.java"
+            outside.write_text("class Outside {}")
+            (root / "Linked.java").symlink_to(outside)
+            self.assertEqual([p.name for p in discover.java_sources(root)], ["A.java", "B.java"])
+
     def test_errors_when_nothing_found(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ModError):

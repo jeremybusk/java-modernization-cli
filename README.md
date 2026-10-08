@@ -38,6 +38,13 @@ checkout (printed at the end) — nothing is pushed. Add `--execute` to also
 push `modernize-java21` to the destination. A build/test failure blocks the
 push unless you pass `--force-push`.
 
+For Spring Boot builds, automatic `javax`→`jakarta` migration accompanies
+an explicit Boot 3+ target; Java-only upgrades preserve the existing namespace.
+Boot 3+ targets require Java 17 or newer.
+
+Local runs and failed runs keep the checkout for inspection. A successful
+push removes its temporary checkout unless you use `--keep` or `--workdir`.
+
 ## Why this exists, and what changed from the earlier tool
 
 An earlier version of this project (`java-update-automation-tool`) grew into
@@ -124,10 +131,10 @@ and `ANTHROPIC_API_KEY` set.
 | `--execute` | — | off (plan + local commit only) | Actually push to `--dest`. |
 | `--local-only` | — | off | Commit locally; never push, even with `--execute`. |
 | `--provider` | `JAVAMOD_PROVIDER` | auto-detected from the URL host | `github`/`gitlab`, selects `GH_TOKEN`/`GITLAB_TOKEN` for an HTTPS push. |
-| `--workdir` | — | a temp dir | Persist the working clone here instead of deleting it. |
+| `--workdir` | — | a temp dir | Use this directory for the working clone and always retain it. Temporary checkouts are also retained unless successfully pushed. |
 | `--report` | — | — | Write the JSON run report here, or `-` for stdout (CI-friendly). |
 | `--diff-stat-lines` | `JAVAMOD_DIFF_STAT_LINES` | `25` | Max changed-file lines in the printed summary; `0` for all. The JSON report always has the full list. |
-| `--quiet` | — | off | Suppress the human-readable summary; pairs with `--report -` for clean machine-readable stdout. |
+| `--quiet` | — | off | Suppress the human-readable summary. With `--report -` or `--issues -`, human output goes to stderr automatically. |
 
 Run `javamod migrate --help` for the complete, current list (it's the
 source of truth; this table summarizes it).
@@ -196,15 +203,22 @@ is saved and its path printed in the summary.
 ### Using `javamod` in CI
 
 ```bash
-javamod migrate --source ./app --dest-branch modernize-java21 --execute --yes \
+set -o pipefail
+javamod migrate --source ./app --dest "$DEST_REPO" --dest-branch modernize-java21 --execute --yes \
   --report - --quiet | jq '.build_ok'
 ```
 
-`--report -` writes the JSON run report to stdout instead of a file (the
-usual Unix convention for "stdout" as a path); `--quiet` suppresses the
-human-readable summary so stdout is clean JSON. The exit code is still `0`
-on success, `1` on a build/test failure, `2` on a usage error, so a pipeline
-can gate on either the exit code or a field in the JSON.
+Set `DEST_REPO` to an existing destination Git repository. `--report -`
+writes JSON to stdout; summaries, prompts, and verbose logs go to stderr.
+`--quiet` suppresses the summary. `set -o pipefail` preserves migration
+failures when piping through `jq`.
+
+The exit code is `0` on success, `1` on a build/test failure in a local run
+or a forced push, and `2` on invalid input, a migration error, or a refused
+or failed push (including a failed build with `--execute`). A completed
+migration writes its report even if publication fails or is cancelled.
+The JSON includes `pushed`, `build_ok`, `error` (null unless publication
+fails), and `local_checkout` (null when the temporary checkout was removed).
 
 ## Examples
 

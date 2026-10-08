@@ -12,9 +12,9 @@ spring-io/spring-javaformat and diffplug/spotless.
 """
 from __future__ import annotations
 
-import stat
 import subprocess
 
+from .buildcheck import _executable
 from .discover import BuildRoot
 from .errors import ModError
 
@@ -27,18 +27,6 @@ _GRADLE_FORMATTERS = (
     ("io.spring.javaformat", "format"),
     ("com.diffplug.spotless", "spotlessApply"),
 )
-
-
-def _project_executable(build: BuildRoot) -> str:
-    # Deliberately the project's own wrapper here (unlike openrewrite.py):
-    # the formatter plugin's version is declared in the project's own
-    # pom.xml/build.gradle, so the project's own Maven/Gradle resolves it
-    # correctly without any extra coordinates from us.
-    wrapper = build.path / ("mvnw" if build.tool == "maven" else "gradlew")
-    if wrapper.is_file():
-        wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
-        return str(wrapper)
-    return "mvn" if build.tool == "maven" else "gradle"
 
 
 def detect_goal(build: BuildRoot) -> str | None:
@@ -63,7 +51,7 @@ def reconcile(build: BuildRoot, *, log=print, timeout: int = 600) -> bool:
     goal = detect_goal(build)
     if goal is None:
         return False
-    exe = _project_executable(build)
+    exe = _executable(build)
     cmd = [exe, "--batch-mode", goal] if build.tool == "maven" else [exe, "--no-daemon", goal]
     log(f"reconciling formatting with the project's own plugin ({goal})")
     try:

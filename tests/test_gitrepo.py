@@ -38,6 +38,42 @@ class LocationParsingTests(unittest.TestCase):
 
 
 class CloneSourceTests(unittest.TestCase):
+    def test_plain_source_rejects_workdir_inside_itself(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "work"
+            workdir.mkdir()
+            with self.assertRaisesRegex(ModError, "outside a plain source"):
+                gitrepo.clone_source(str(root), None, workdir, allow_dirty=False, shallow=False, token_env=None)
+            self.assertFalse((workdir / "src").exists())
+
+    def test_explicit_local_tag_is_available_with_no_tags_clone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            init_repo(source)
+            git("tag", "release", cwd=source)
+            expected = gitrepo.capture(["git", "rev-parse", "release"], source)
+            (source / "README.md").write_text("newer")
+            gitrepo.commit_all(source, "newer")
+            workdir = root / "work"
+            workdir.mkdir()
+            clone = gitrepo.clone_source(str(source), "release", workdir,
+                                         allow_dirty=False, shallow=False, token_env=None)
+            self.assertEqual(gitrepo.capture(["git", "rev-parse", "HEAD"], clone), expected)
+
+    def test_shallow_remote_ref_does_not_clone_full_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            init_repo(source)
+            workdir = root / "work"
+            workdir.mkdir()
+            clone = gitrepo.clone_source(source.as_uri(), "main", workdir,
+                                         allow_dirty=False, shallow=True, token_env=None)
+            self.assertEqual(gitrepo.capture(["git", "rev-parse", "--is-shallow-repository"], clone), "true")
+            self.assertEqual(gitrepo.capture(["git", "rev-list", "--count", "HEAD"], clone), "1")
+
     def test_clones_a_local_git_repo_at_head(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -143,6 +179,28 @@ class CommitAndPushTests(unittest.TestCase):
             (repo / "new.txt").write_text("hello\n", encoding="utf-8")
             gitrepo.commit_all(repo, "add new.txt")
             self.assertIn("new.txt", gitrepo.diff_stat_since(repo, base_rev))
+
+    def test_nested_module_outputs_are_excluded_without_hiding_other_builds(self):
+        for tool, output in (("maven", "target"), ("gradle", "build"), ("gradle", ".gradle")):
+            with self.subTest(tool=tool, output=output), tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp) / "repo"
+                init_repo(repo)
+                build = repo / "app"
+                build.mkdir()
+                gitrepo.ignore_build_outputs(repo, build, tool)
+                generated = build / "module" / output / "generated.txt"
+                generated.parent.mkdir(parents=True)
+                generated.write_text("generated")
+                source = build / "module" / "Source.java"
+                source.write_text("class Source {}")
+                other = repo / "other" / output / "keep.txt"
+                other.parent.mkdir(parents=True)
+                other.write_text("unrelated")
+                gitrepo.commit_all(repo, "migration")
+                committed = gitrepo.capture(["git", "show", "--name-only", "--pretty=", "HEAD"], repo)
+                self.assertNotIn("generated.txt", committed)
+                self.assertIn("Source.java", committed)
+                self.assertIn("keep.txt", committed)
 
     def test_diff_stat_since_head_itself_is_empty_after_a_commit(self):
         # Regression check: diffing against plain HEAD *after* committing is

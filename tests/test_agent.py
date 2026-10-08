@@ -44,6 +44,31 @@ def fake_cli(root: Path, script: str) -> Path:
 
 
 class ResolveSkillTests(unittest.TestCase):
+    def test_remote_skill_cannot_escape_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("javamod.agent._fetch"):
+            with self.assertRaisesRegex(ModError, "within its repository"):
+                agent.resolve_skill("https://example.com/skill.git#../../outside", Path(tmp))
+
+    def test_installation_preserves_existing_project_skills(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = make_repo(root)
+            source = make_skill(root, "demo")
+            target = repo / ".claude/skills/demo"
+            target.mkdir(parents=True)
+            (target / "SKILL.md").write_text("original")
+            with self.assertRaisesRegex(ModError, "already exists"):
+                agent.install_skills(repo, agent.AGENTS["claude"], [str(source)], root / "cache")
+            self.assertEqual((target / "SKILL.md").read_text(), "original")
+
+    def test_invalid_skill_name_cannot_escape_installation_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = make_skill(root, "demo")
+            (source / "SKILL.md").write_text("---\nname: ..\n---\nbody")
+            with self.assertRaisesRegex(ModError, "invalid skill name"):
+                agent.install_skills(root, agent.AGENTS["claude"], [str(source)], root / "cache")
+
     def test_local_directory_with_skill_md(self):
         with tempfile.TemporaryDirectory() as tmp:
             skill = make_skill(Path(tmp), "demo")

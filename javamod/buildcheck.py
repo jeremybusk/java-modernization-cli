@@ -49,7 +49,11 @@ def _skip_file(build: BuildRoot, skip_tests: list[str]) -> Path:
         text = "".join(f"{path_of(name)}.java\n" for name in skip_tests)
         suffix = ".txt"
     else:
-        patterns = ", ".join(f"'{path_of(name)}.class', '{path_of(name)}$*.class'" for name in skip_tests)
+        # Groovy single-quoted strings keep '$' literal for nested classes.
+        def quote(value: str) -> str:
+            return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        patterns = ", ".join(f"{quote(path_of(name) + '.class')}, {quote(path_of(name) + '$*.class')}"
+                             for name in skip_tests)
         text = f"allprojects {{ tasks.withType(Test) {{ exclude {patterns} }} }}\n"
         suffix = ".gradle"
     handle, name = tempfile.mkstemp(prefix="javamod-skip-tests-", suffix=suffix)
@@ -79,7 +83,9 @@ def validate(build: BuildRoot, *, run_tests: bool, skip_tests: list[str] = (), t
     except FileNotFoundError:
         return BuildResult(ok=False, command=cmd, output=f"{exe} is not installed or not on PATH")
     except subprocess.TimeoutExpired as exc:
-        output = exc.stdout if isinstance(exc.stdout, str) else ""
+        output = exc.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
         return BuildResult(ok=False, command=cmd, output=output[-MAX_OUTPUT_CHARS:] + "\n(timed out)")
     finally:
         if skip_file:

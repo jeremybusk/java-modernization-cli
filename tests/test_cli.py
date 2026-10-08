@@ -302,5 +302,154 @@ class EnvVarDefaultTests(unittest.TestCase):
             self.assertEqual(args.java, 21)
 
 
+class AutomationRegressionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.source = make_source_repo(self.root)
+        self.workdir = self.root / "work"
+
+    def migrate(self, *extra, temporary=False):
+        argv = ["migrate", "--source", str(self.source), "--dest-branch", "modernize",
+                "--local-only", "--skip-build", "--report", "-", *extra]
+        if not temporary:
+            argv += ["--workdir", str(self.workdir)]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch("javamod.openrewrite.run", return_value=False), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main(argv)
+        return code, json.loads(stdout.getvalue()), stderr.getvalue()
+
+    def test_verbose_json_is_clean_without_quiet(self):
+        code, payload, diagnostics = self.migrate("--verbose")
+        self.assertEqual(code, 0)
+        self.assertIn("[javamod] cloning", diagnostics)
+        self.assertIn("source:", diagnostics)
+        self.assertEqual(payload["local_checkout"], str(self.workdir / "src"))
+
+    def test_successful_temporary_local_checkout_is_retained(self):
+        with mock.patch("javamod.cli.tempfile.mkdtemp", return_value=str(self.workdir)):
+            code, payload, _ = self.migrate(temporary=True)
+        self.assertEqual(code, 0)
+        self.assertTrue(Path(payload["local_checkout"]).is_dir())
+
+    def test_report_survives_push_failure(self):
+        from javamod.errors import ModError
+        stdout = io.StringIO()
+        with mock.patch("javamod.openrewrite.run", return_value=False), \
+                mock.patch("javamod.gitrepo.push", side_effect=ModError("destination rejected push")), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["migrate", "--source", str(self.source), "--dest-branch", "b",
+                             "--dest", "unused", "--execute", "--yes", "--skip-build", "--report", "-",
+                             "--workdir", str(self.root / "push-work")])
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 2)
+        self.assertFalse(payload["pushed"])
+        self.assertIn("destination rejected push", payload["error"])
+        self.assertTrue(Path(payload["local_checkout"]).is_dir())
+
+    def test_successful_push_cleans_only_its_temporary_checkout(self):
+        dest = self.root / "dest.git"
+        stdout = io.StringIO()
+        with mock.patch("javamod.openrewrite.run", return_value=False), \
+                mock.patch("javamod.cli.tempfile.mkdtemp", return_value=str(self.workdir)), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["migrate", "--source", str(self.source), "--dest-branch", "b",
+                             "--dest", str(dest), "--init-dest", "--execute", "--yes", "--skip-build", "--report", "-"])
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["pushed"])
+        self.assertIsNone(payload["local_checkout"])
+        self.assertFalse(self.workdir.exists())
+        self.assertTrue((dest / "refs/heads/b").is_file())
+
+    def test_cancelled_push_writes_report(self):
+        stdout = io.StringIO()
+        with mock.patch("javamod.openrewrite.run", return_value=False), \
+                mock.patch("sys.stdin.isatty", return_value=True), mock.patch("builtins.input", return_value="no"), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["migrate", "--source", str(self.source), "--dest-branch", "b",
+                             "--dest", "unused", "--execute", "--skip-build", "--report", "-",
+                             "--workdir", str(self.workdir)])
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(stdout.getvalue())["error"], "push cancelled")
+
+    def test_hybrid_fixes_are_formatted_and_validated_again(self):
+        from javamod.buildcheck import BuildResult
+        failed, passed = BuildResult(False, [], "compile failed"), BuildResult(True, [], "")
+        stdout = io.StringIO()
+        with mock.patch("javamod.openrewrite.run", return_value=False), \
+                mock.patch("javamod.buildcheck.validate", side_effect=[failed, passed]) as validate, \
+                mock.patch("javamod.ai.fix_build", return_value=failed), \
+                mock.patch("javamod.formatting.reconcile", return_value=True) as formatter, \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["migrate", "--source", str(self.source), "--dest-branch", "b", "--local-only",
+                             "--engine", "hybrid", "--report", "-", "--workdir", str(self.workdir)])
+        self.assertEqual(code, 0)
+        self.assertTrue(json.loads(stdout.getvalue())["build_ok"])
+        self.assertEqual(formatter.call_count, 2)
+        self.assertEqual(validate.call_count, 2)
+
+    def test_local_only_execute_build_failure_does_not_claim_a_blocked_push(self):
+        with mock.patch("javamod.buildcheck.validate", return_value=mock.Mock(ok=False, output="bad build")):
+            stdout = io.StringIO()
+            with mock.patch("javamod.openrewrite.run", return_value=False), \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                code = cli.main(["migrate", "--source", str(self.source), "--dest-branch", "b",
+                                 "--local-only", "--execute", "--quiet", "--report", "-",
+                                 "--workdir", str(self.workdir)])
+        self.assertEqual(code, 1)
+        self.assertFalse(json.loads(stdout.getvalue())["build_ok"])
+
+    def test_init_dest_does_not_create_destination_during_local_run(self):
+        dest = self.root / "dest.git"
+        code, _, _ = self.migrate("--init-dest", "--dest", str(dest))
+        self.assertEqual(code, 0)
+        self.assertFalse(dest.exists())
+
+    def test_existing_destination_branch_preserves_source_ref(self):
+        git("switch", "-c", "feature", cwd=self.source)
+        (self.source / "pom.xml").write_text(POM_JAVA_8.replace(">8<", ">17<"), encoding="utf-8")
+        git("add", "-A", cwd=self.source)
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "feature", cwd=self.source)
+        git("switch", "main", cwd=self.source)
+        code, _, _ = self.migrate("--source-ref", "feature", "--dest-branch", "main")
+        self.assertEqual(code, 0)
+        self.assertIn(">17<", (self.workdir / "src/pom.xml").read_text())
+
+    def test_ai_report_does_not_claim_recipes_were_applied(self):
+        with mock.patch("javamod.ai.modernize_tree", return_value=[]):
+            code, payload, _ = self.migrate("--engine", "ai")
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["recipes"], [])
+
+    def test_ignored_boot_target_is_not_reported_as_applied(self):
+        code, payload, _ = self.migrate("--boot", "3.5")
+        self.assertEqual(code, 0)
+        self.assertIsNone(payload["boot_target"])
+
+    def test_invalid_env_defaults_fail_before_cloning(self):
+        for variable, value in (("JAVAMOD_JAVA", "abc"), ("JAVAMOD_JAVA", "99"),
+                                ("JAVAMOD_ENGINE", "unknown"), ("JAVAMOD_ALLOW_CODEGENOME", "maybe")):
+            with self.subTest(variable=variable, value=value), \
+                    mock.patch.dict("os.environ", {variable: value}), \
+                    mock.patch("javamod.gitrepo.clone_source") as clone, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = cli.main(["migrate", "--source", str(self.source), "--dest-branch", "b", "--local-only"])
+                self.assertEqual(code, 2)
+                clone.assert_not_called()
+
+    def test_invalid_limits_and_branch_fail_before_cloning(self):
+        for flag, value in (("--agent-retries", "-1"), ("--ai-max-files", "0"),
+                            ("--agent-timeout", "0"), ("--dest-branch", "bad..name")):
+            with self.subTest(flag=flag), mock.patch("javamod.gitrepo.clone_source") as clone, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = cli.main(["migrate", "--source", str(self.source), "--dest-branch", "b", "--local-only",
+                                 flag, value])
+                self.assertEqual(code, 2)
+                clone.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

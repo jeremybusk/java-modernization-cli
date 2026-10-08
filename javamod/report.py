@@ -13,6 +13,8 @@ from typing import Any
 
 def _cap_diff_stat(diff_stat: str, limit: int) -> str:
     """Keep the first *limit* file lines and git's totals line ("N files changed, ...")."""
+    if not diff_stat:
+        return ""
     *files, totals = diff_stat.splitlines()
     if limit <= 0 or len(files) <= limit:
         return diff_stat
@@ -46,6 +48,8 @@ class RunReport:
     agent_passes: int = 0
     agent_skills: list[str] = dataclasses.field(default_factory=list)
     agent_log: str | None = None
+    local_checkout: str | None = None
+    error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self) | {"generated_at": dt.datetime.now(dt.timezone.utc).isoformat()}
@@ -57,10 +61,10 @@ class RunReport:
         print(f"build:       {self.build_tool} @ {self.build_root}  -> Java {self.target_java}"
               + (f", Spring Boot {self.boot_target}" if self.boot_target else ""))
         print(f"profile:     {self.profile}   engine: {self.engine}")
-        print(f"recipes:     {len(self.recipes)} applied" if self.recipes else "recipes:     none (ai-only engine)")
+        print(f"recipes:     {len(self.recipes)} applied" if self.recipes else "recipes:     none")
         if self.agent:
             passes = f"{self.agent_passes} passes, " if self.agent_passes > 1 else ""
-            status = ("not run: build passed without it" if not self.agent_passes
+            status = ("not run" if not self.agent_passes
                       else f"{passes}{'finished' if self.agent_ok else 'did NOT finish cleanly'}")
             print(f"agent:       {self.agent} ({status})"
                   + (f", skills: {', '.join(self.agent_skills)}" if self.agent_skills else "")
@@ -81,7 +85,9 @@ class RunReport:
         if self.commit:
             print(f"\ncommit:      {self.commit}  (branch {self.branch})")
         if self.destination:
-            print(f"destination: {self.destination}#{self.branch}  ({'pushed' if self.pushed else 'not pushed (plan only)'})")
+            print(f"destination: {self.destination}#{self.branch}  ({'pushed' if self.pushed else 'not pushed'})")
+        if self.local_checkout:
+            print(f"local checkout: {self.local_checkout}")
         print()
 
     def write_json(self, destination: str) -> None:

@@ -90,7 +90,7 @@ def clone_source(source: str, ref: str | None, workdir: Path, *, allow_dirty: bo
     if is_remote(source):
         env = git_env(workdir, token_env)
         cmd = ["git", "clone", "--no-tags"]
-        if shallow and not ref:
+        if shallow:
             cmd += ["--depth", "1"]
         cmd += [source, str(dest)]
         run(cmd, cwd=workdir, env=env, display=shlex.join(cmd[:-2] + ["<source>", str(dest)]))
@@ -107,15 +107,17 @@ def clone_source(source: str, ref: str | None, workdir: Path, *, allow_dirty: bo
             raise ModError(f"source has uncommitted changes (pass --allow-dirty): {local}")
         run(["git", "clone", "--no-hardlinks", "--no-tags", str(local), str(dest)], cwd=workdir)
         if ref:
-            try:
-                revision = capture(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], dest)
-            except ModError:
-                revision = capture(["git", "rev-parse", "--verify", f"origin/{ref}^{{commit}}"], dest)
+            # Resolve in the source: --no-tags intentionally omits local tag
+            # names, and a tag may point at a commit absent from any branch.
+            revision = capture(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], local)
+            run(["git", "fetch", "--no-tags", "origin", revision], cwd=dest)
             run(["git", "checkout", "--detach", revision], cwd=dest)
         return dest
     # A plain (non-git) directory: copy it so the source tree is untouched.
     if ref:
         raise ModError("a source ref requires a Git repository; the plain directory has none")
+    if workdir.resolve().is_relative_to(local):
+        raise ModError("--workdir must be outside a plain source directory to avoid copying the checkout into itself")
     shutil.copytree(local, dest, symlinks=True,
                      ignore=shutil.ignore_patterns(".git", "target", "build", ".gradle", "node_modules"))
     run(["git", "init", "-q", "-b", "main"], cwd=dest)
@@ -130,9 +132,9 @@ def current_branch(repo: Path) -> str:
 
 
 def ensure_branch(repo: Path, branch: str) -> None:
-    exists = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
-                             cwd=repo).returncode == 0
-    run(["git", "switch", branch] if exists else ["git", "switch", "-c", branch], cwd=repo)
+    # This is an isolated clone: name the selected source revision even if
+    # the source already has a branch with the destination's name.
+    run(["git", "switch", "-C", branch], cwd=repo)
 
 
 def diff_stat_since(repo: Path, base_rev: str) -> str:
@@ -175,7 +177,7 @@ def ignore_build_outputs(repo: Path, build_root: Path, tool: str) -> None:
     relative = build_root.resolve().relative_to(repo.resolve()).as_posix()
     prefix = "" if relative == "." else relative + "/"
     names = ("target",) if tool == "maven" else ("build", ".gradle")
-    exclude(repo, [f"/{prefix}{name}/" for name in names])
+    exclude(repo, [f"/{prefix}**/{name}/" for name in names])
 
 
 def exclude(repo: Path, patterns: list[str]) -> None:

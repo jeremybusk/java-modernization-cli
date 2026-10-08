@@ -17,6 +17,7 @@ Extend it as new patterns are actually confirmed.
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -77,9 +78,9 @@ KNOWN_PATTERNS: list[dict[str, Any]] = [
     },
 ]
 
-_MAVEN_ERROR_RE = re.compile(r"^\[ERROR\]\s+(?P<file>\S+\.java):\[(?P<line>\d+),\d+\]\s+(?P<message>.*)$")
+_MAVEN_ERROR_RE = re.compile(r"^\[ERROR\]\s+(?P<file>.+?\.java):\[(?P<line>\d+),\d+\]\s+(?P<message>.*)$")
 _MAVEN_CONTINUATION_RE = re.compile(r"^\[ERROR\]\s{2,}(?P<text>.*)$")
-_GRADLE_ERROR_RE = re.compile(r"^(?P<file>\S+\.java):(?P<line>\d+):\s*error:\s*(?P<message>.*)$")
+_GRADLE_ERROR_RE = re.compile(r"^(?P<file>.+?\.java):(?P<line>\d+):\s*error:\s*(?P<message>.*)$")
 _GRADLE_CONTINUATION_RE = re.compile(r"^\s{2,}(?P<text>\S.*)$")
 _TEST_FAILURE_RE = re.compile(r"^\s{2}(?P<test>\S+\.\S+)\s+\u00bb\s+(?P<detail>.+)$")
 # Surefire 3's end-of-module summary (one entry per failing test method):
@@ -267,8 +268,8 @@ def _yaml_scalar(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
-    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-    return f'"{escaped}"'
+    # JSON string escaping is valid YAML and handles tabs/control characters.
+    return json.dumps(str(value), ensure_ascii=False)
 
 
 def to_yaml(issues: list[dict[str, Any]]) -> str:

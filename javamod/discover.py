@@ -9,8 +9,11 @@ should be run once per application via ``--build-root``.
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
 import xml.etree.ElementTree as ET
+from collections import deque
+from collections.abc import Iterator
 from pathlib import Path
 
 from .errors import ModError
@@ -58,6 +61,8 @@ def find_build_root(repo: Path, relative: str | None, max_depth: int = 2) -> Bui
     """
     if relative:
         candidate = (repo / relative).resolve()
+        if not candidate.is_relative_to(repo.resolve()):
+            raise ModError("--build-root must stay within the source repository")
         tool = _tool_at(candidate)
         if not tool:
             raise ModError(f"no pom.xml or build.gradle[.kts] at --build-root {relative}")
@@ -70,10 +75,8 @@ def find_build_root(repo: Path, relative: str | None, max_depth: int = 2) -> Bui
     found: list[Path] = []
     for depth in range(1, max_depth + 1):
         for candidate in _dirs_at_depth(repo, depth):
-            if _tool_at(candidate):
+            if not any(candidate.is_relative_to(root) for root in found) and _tool_at(candidate):
                 found.append(candidate)
-        if found:
-            break
     if not found:
         raise ModError(f"no Maven or Gradle build found under {repo} (searched {max_depth} levels deep)")
     if len(found) > 1:
@@ -89,8 +92,9 @@ def _dirs_at_depth(root: Path, depth: int) -> list[Path]:
     for _ in range(depth):
         nxt = []
         for d in level:
-            for child in d.iterdir():
-                if child.is_dir() and child.name not in IGNORED_DIRS and not child.name.startswith("."):
+            for child in sorted(d.iterdir()):
+                if (child.is_dir() and not child.is_symlink() and child.name not in IGNORED_DIRS
+                        and not child.name.startswith(".")):
                     nxt.append(child)
         level = nxt
     return level
@@ -131,29 +135,44 @@ def _module_dirs(path: Path, tool: str) -> list[Path]:
     build file, so any build.gradle[.kts] outside src/ and output dirs counts.
     """
     if tool == "gradle":
-        return [path] + sorted({
-            f.parent for name in ("build.gradle", "build.gradle.kts") for f in path.rglob(name)
-            if f.parent != path and not (set(f.relative_to(path).parts) & (IGNORED_DIRS | {"src"}))
-        })
-    dirs, queue = [], [path]
+        dirs = []
+        for directory, children, files in os.walk(path):
+            children[:] = sorted(name for name in children if name not in IGNORED_DIRS | {"src"}
+                                 and not name.startswith("."))
+            if Path(directory) == path or {"build.gradle", "build.gradle.kts"} & set(files):
+                dirs.append(Path(directory))
+        return dirs
+    dirs, seen, queue = [], set(), deque([path.resolve()])
     while queue:
-        current = queue.pop(0)
-        if current in dirs or not (current / "pom.xml").is_file():
+        current = queue.popleft()
+        if current in seen or not (current / "pom.xml").is_file():
             continue
+        seen.add(current)
         dirs.append(current)
         try:
             root = ET.parse(current / "pom.xml").getroot()
         except ET.ParseError:
             continue
-        queue += [(current / (m.text or "").strip()).resolve() for el in root if _local(el.tag) == "modules"
-                  for m in el if _local(m.tag) == "module" and (m.text or "").strip()]
+        queue.extend((current / (m.text or "").strip()).resolve() for el in root if _local(el.tag) == "modules"
+                     for m in el if _local(m.tag) == "module" and (m.text or "").strip())
     return dirs
+
+
+def java_sources(path: Path) -> Iterator[Path]:
+    """Yield source paths in a stable order, pruning generated/hidden trees."""
+    root = path.resolve()
+    for directory, children, files in os.walk(path):
+        children[:] = sorted(name for name in children if name not in IGNORED_DIRS and not name.startswith("."))
+        for name in sorted(files):
+            source = Path(directory) / name
+            if name.endswith(".java") and source.is_file() and source.resolve().is_relative_to(root):
+                yield source
 
 
 def _import_features(dirs: list[Path]) -> set[str]:
     found: set[str] = set()
     for directory in dirs:
-        for source in (directory / "src").rglob("*.java"):
+        for source in java_sources(directory / "src"):
             for name in _IMPORT_RE.findall(source.read_text(encoding="utf-8", errors="ignore")):
                 for feature, prefixes in IMPORT_MARKERS.items():
                     if name.startswith(prefixes) and not (feature == "junit4" and name.startswith(

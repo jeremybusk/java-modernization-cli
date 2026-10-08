@@ -108,7 +108,9 @@ def resolve_skill(spec: str, cache: Path) -> Path:
         checkout = cache / re.sub(r"\W+", "-", spec).strip("-")
         if not checkout.exists():
             _fetch(url, commit, checkout)
-        path = checkout / subdir
+        path = (checkout / subdir).resolve()
+        if not path.is_relative_to(checkout.resolve()):
+            raise ModError(f"--agent-skill '{spec}': skill path must stay within its repository")
     if not (path / "SKILL.md").is_file():
         raise ModError(f"--agent-skill '{spec}': no SKILL.md at {path}")
     return path
@@ -125,8 +127,14 @@ def install_skills(repo: Path, agent: AgentCli, specs: list[str], cache: Path) -
     for spec in specs:
         source = resolve_skill(spec, cache)
         name = skill_name(source)
+        if not re.fullmatch(r"[\w][\w.-]*", name) or name in {".", ".."}:
+            raise ModError(f"invalid skill name: {name!r}")
         target = repo / agent.skills_dir / name
-        shutil.copytree(source, target, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
+        if target.exists():
+            raise ModError(f"skill directory already exists; refusing to overwrite it: {target}")
+        if not target.resolve().is_relative_to(repo.resolve()):
+            raise ModError(f"skill directory must stay within the repository: {target}")
+        shutil.copytree(source, target, ignore=shutil.ignore_patterns(".git"))
         gitrepo.exclude(repo, [f"/{agent.skills_dir}/{name}/"])
         names.append(name)
     return names

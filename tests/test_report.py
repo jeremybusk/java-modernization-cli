@@ -47,6 +47,7 @@ class DiffStatCapTests(unittest.TestCase):
         self.assertTrue(capped.endswith("30 deletions(-)"))
 
     def test_zero_or_short_lists_are_unchanged(self):
+        self.assertEqual(report._cap_diff_stat("", 25), "")
         self.assertEqual(report._cap_diff_stat(self.STAT, 0), self.STAT)
         self.assertEqual(report._cap_diff_stat(self.STAT, 30), self.STAT)
 

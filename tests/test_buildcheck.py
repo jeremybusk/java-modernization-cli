@@ -1,4 +1,5 @@
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -24,6 +25,15 @@ NOISY_MAVEN = """[INFO] Running com.example.FooTest
 
 
 class CondenseTests(unittest.TestCase):
+    def test_timeout_preserves_partial_byte_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build = BuildRoot(path=Path(tmp), tool="maven")
+            with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("mvn", 1, output=b"compile failed\n")):
+                result = buildcheck.validate(build, run_tests=True, timeout=1)
+        self.assertFalse(result.ok)
+        self.assertIn("compile failed", result.output)
+        self.assertIn("timed out", result.output)
+
     def test_maven_keeps_errors_and_reactor_summary_and_drops_log_noise(self):
         text = buildcheck.condense("maven", NOISY_MAVEN)
         self.assertIn("FooTest.bar:26", text)

@@ -9,6 +9,8 @@ way against every repository.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import os
 import shutil
 import sys
 import tempfile
@@ -174,17 +176,17 @@ def _agent_pass(args: argparse.Namespace, repo: Path, prompt: str, log_path: Pat
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:
-    if not args.local_only and not args.dest:
-        raise ModError("--dest is required unless --local-only is set")
     source, inline_ref = gitrepo.split_ref(args.source)
     ref = args.source_ref or inline_ref
-    log = (lambda msg: print(f"[javamod] {msg}")) if args.verbose else (lambda _msg: None)
+    log = (lambda msg: print(f"[javamod] {msg}", file=sys.stderr)) if args.verbose else (lambda _msg: None)
+    human_stream = sys.stderr if args.report == "-" or args.issues == "-" else sys.stdout
 
     persistent = args.workdir is not None
     workdir = (args.workdir or Path(tempfile.mkdtemp(prefix="javamod-"))).expanduser().resolve()
     workdir.mkdir(parents=True, exist_ok=True)
     push_token_env = _resolve_token_env(args)
     success = False
+    report = None
     try:
         log(f"cloning {source}" + (f"#{ref}" if ref else ""))
         src_path = gitrepo.clone_source(
@@ -197,14 +199,15 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         log(f"{build.tool} build at {build.path.relative_to(src_path)}"
             f" (current Java: {build.current_java or 'unknown'}, features: {sorted(build.features) or 'none detected'})")
         gitrepo.ignore_build_outputs(src_path, build.path, build.tool)
-        if args.boot and not build.spring_boot and not args.quiet:
+        boot = args.boot if build.spring_boot else None
+        if args.boot and not boot and not args.quiet:
             print(f"warning: --boot {args.boot} ignored: no Spring Boot detected in this build", file=sys.stderr)
 
         branch = args.dest_branch
         gitrepo.ensure_branch(src_path, branch)
 
         plan = recipes.build_plan(
-            build, target_java=args.java, boot=args.boot, profile=args.profile,
+            build, target_java=args.java, boot=boot, profile=args.profile,
             dependency_strategy=args.dependency_strategy, extra_recipes=tuple(args.recipe),
         )
         if args.engine in ("openrewrite", "hybrid"):
@@ -223,14 +226,18 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         if args.agent:
             # Outlives a temp workdir that's deleted on success: the
             # transcript is what you review an agent run by.
-            agent_log = (workdir / "agent-transcript.log" if persistent or args.keep
-                         else Path(tempfile.mkstemp(prefix="javamod-agent-", suffix=".log")[1]))
+            if persistent or args.keep:
+                agent_log = workdir / "agent-transcript.log"
+            else:
+                handle, name = tempfile.mkstemp(prefix="javamod-agent-", suffix=".log")
+                os.close(handle)
+                agent_log = Path(name)
             agent_skills = agent.install(src_path, args.agent, args.agent_skill, workdir / "agent-skills", log=log)
 
         def first_prompt(failure: str | None = None) -> str:
             return agent.build_prompt(
                 build, src_path, plan.recipe_names if args.engine != "ai" else [], target_java=args.java,
-                boot=args.boot, skills=agent_skills, run_tests=run_tests, skip_tests=skip_tests, failure=failure,
+                boot=boot, skills=agent_skills, run_tests=run_tests, skip_tests=skip_tests, failure=failure,
             )
         if args.agent and args.agent_on == "always":
             agent_passes.append(_agent_pass(args, src_path, first_prompt(), agent_log, log))
@@ -245,6 +252,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
                     build, build_result, model=args.ai_model, max_iterations=args.ai_max_iterations,
                     run_tests=run_tests, skip_tests=skip_tests, log=log,
                 )
+                if not args.skip_format and formatting.reconcile(build, log=log):
+                    build_result = buildcheck.validate(build, run_tests=run_tests, skip_tests=skip_tests)
             # Each pass here hands the agent javamod's own failure, not its
             # own view of the build, and javamod re-checks -- the agent never
             # gets to declare the build fixed. With --agent-on failure the
@@ -266,7 +275,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
                     formatting.reconcile(build, log=log)
                 build_result = buildcheck.validate(build, run_tests=run_tests, skip_tests=skip_tests)
 
-        message = f"javamod: modernize to Java {args.java}" + (f", Spring Boot {args.boot}" if args.boot else "")
+        message = f"javamod: modernize to Java {args.java}" + (f", Spring Boot {boot}" if boot else "")
         if skip_tests:
             message += "\n\nTests excluded from javamod's build check: " + ", ".join(skip_tests)
         commit = gitrepo.commit_all(src_path, message)
@@ -283,11 +292,12 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             build_log = workdir / "build-output.log"
             build_log.write_text(build_result.output, encoding="utf-8")
             if not args.quiet and residual_issues:
-                triage.print_summary(residual_issues)
+                with contextlib.redirect_stdout(human_stream):
+                    triage.print_summary(residual_issues)
             issues_destination = args.issues or str(workdir / "remaining-issues.yaml")
             triage.write(residual_issues, issues_destination)
             if not args.quiet and issues_destination != "-":
-                print(f"\nfull triage written to {issues_destination}")
+                print(f"\nfull triage written to {issues_destination}", file=human_stream)
         # Built now, before any raise below, so --report still gets written on
         # a failure that blocks the push -- that's precisely when a CI
         # consumer most needs the structured build_ok/residual_issues fields,
@@ -295,7 +305,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         report = RunReport(
             source=source, source_ref=ref, build_tool=build.tool,
             build_root=str(build.path.relative_to(src_path)), target_java=args.java,
-            boot_target=args.boot, profile=args.profile, engine=args.engine, recipes=plan.recipe_names,
+            boot_target=boot, profile=args.profile, engine=args.engine,
+            recipes=plan.recipe_names if args.engine != "ai" else [],
             changed=changed, diff_stat=diff_stat, build_ok=build_ok,
             build_output_tail=buildcheck.condense(build.tool, build_result.output) if build_ok is False else "",
             commit=commit, branch=branch,
@@ -306,73 +317,86 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             agent_log=str(agent_log) if agent_log else None,
         )
 
-        if build_ok is False and args.execute and not args.force_push:
-            if not args.quiet:
-                report.print_summary(diff_stat_lines=args.diff_stat_lines)
-            if args.report:
-                report.write_json(args.report)
+        if build_ok is False and args.execute and not args.local_only and not args.force_push:
             raise ModError("build/tests failed after migration; not pushing (use --force-push to push anyway)")
 
-        pushed = False
         if args.execute and not args.local_only:
             if not args.yes and sys.stdin.isatty():
-                reply = input(f"Push branch '{branch}' to {args.dest}? [y/N] ")
+                print(f"Push branch '{branch}' to {args.dest}? [y/N] ", end="", file=sys.stderr, flush=True)
+                reply = input()
                 if reply.strip().lower() not in {"y", "yes"}:
                     raise ModError("push cancelled")
             log(f"pushing {branch} -> {args.dest}")
+            if args.init_dest and not gitrepo.is_remote(args.dest):
+                gitrepo.init_bare_destination(Path(args.dest).expanduser().resolve())
             gitrepo.push(src_path, branch, args.dest, token_env=push_token_env, force=args.force_push)
-            pushed = True
-        report.pushed = pushed
-
-        if not args.quiet:
-            report.print_summary(diff_stat_lines=args.diff_stat_lines)
-            if not pushed:
-                print(f"local checkout: {src_path}")
-        if args.report:
-            report.write_json(args.report)
+            report.pushed = True
         success = build_ok is not False
         return 0 if success else 1
-    except ModError as exc:
+    except (ModError, OSError) as exc:
+        if report is not None:
+            report.error = str(exc)
         print(f"error: {exc}", file=sys.stderr)
         return 2
     finally:
-        if success and not persistent and not args.keep:
+        cleanup = success and report is not None and report.pushed and not persistent and not args.keep
+        if report is not None:
+            report.local_checkout = None if cleanup else str(workdir / "src")
+            if not args.quiet:
+                with contextlib.redirect_stdout(human_stream):
+                    report.print_summary(diff_stat_lines=args.diff_stat_lines)
+            if args.report:
+                report.write_json(args.report)
+        if cleanup:
             shutil.rmtree(workdir, ignore_errors=True)
         elif not success:
             print(f"workdir kept for inspection: {workdir}", file=sys.stderr)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.command == "doctor":
-        return cmd_doctor(args)
-    if args.command == "migrate" and args.recipe_source == "codegenome" and not args.allow_codegenome:
-        print("error: --recipe-source codegenome also requires --allow-codegenome", file=sys.stderr)
-        return 2
-    if args.command == "migrate" and (args.agent_skill or args.agent_retries) and not args.agent:
-        print("error: --agent-skill and --agent-retries need --agent", file=sys.stderr)
-        return 2
-    if args.command == "migrate" and args.agent and args.agent_on == "failure" and args.skip_build:
-        print("error: --agent-on failure needs the build check; drop --skip-build", file=sys.stderr)
-        return 2
-    if args.command == "migrate" and args.report == "-" and args.issues == "-":
+def _validate_migrate(args: argparse.Namespace) -> None:
+    # argparse validates explicit choices, but not environment-supplied defaults.
+    choices = {
+        "java": recipes.TARGET_JAVA_VERSIONS, "profile": recipes.PROFILE_DEFAULTS,
+        "dependency_strategy": ("patch", "latest"), "recipe_source": recipes.PLUGIN_VERSIONS,
+        "engine": ("openrewrite", "hybrid", "ai"), "agent": agent.AGENTS,
+        "agent_on": ("always", "failure"), "provider": ("github", "gitlab"),
+    }
+    for name, allowed in choices.items():
+        value = getattr(args, name)
+        if value is not None and value not in allowed:
+            raise ModError(f"--{name.replace('_', '-')} must be one of {', '.join(map(str, allowed))}")
+    for name, minimum in (("ai_max_iterations", 0), ("ai_max_files", 1), ("agent_timeout", 1),
+                          ("agent_retries", 0), ("diff_stat_lines", 0)):
+        if getattr(args, name) < minimum:
+            raise ModError(f"--{name.replace('_', '-')} must be at least {minimum}")
+    if not args.local_only and not args.dest:
+        raise ModError("--dest is required unless --local-only is set")
+    if args.recipe_source == "codegenome" and not args.allow_codegenome:
+        raise ModError("--recipe-source codegenome also requires --allow-codegenome")
+    if (args.agent_skill or args.agent_retries) and not args.agent:
+        raise ModError("--agent-skill and --agent-retries need --agent")
+    if args.agent and args.agent_on == "failure" and args.skip_build:
+        raise ModError("--agent-on failure needs the build check; drop --skip-build")
+    if args.report == "-" and args.issues == "-":
         # Both on stdout would interleave YAML and JSON; the report already
         # carries the same issues as its residual_issues field.
-        print("error: --report - and --issues - can't both use stdout; the report already includes the issues "
-              "as residual_issues", file=sys.stderr)
-        return 2
-    if args.command == "migrate" and args.agent:
-        try:
-            agent.cli_for(args.agent)  # fail before cloning, not after the recipes
-        except ModError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-    if args.command == "migrate" and args.init_dest and args.dest and not gitrepo.is_remote(args.dest):
-        gitrepo.init_bare_destination(Path(args.dest).expanduser().resolve())
+        raise ModError("--report - and --issues - can't both use stdout; the report already includes the issues "
+                       "as residual_issues")
+    if args.dest_branch.startswith("-") or args.dest_branch == "HEAD":
+        raise ModError(f"invalid destination branch: {args.dest_branch!r}")
+    gitrepo.run(["git", "check-ref-format", f"refs/heads/{args.dest_branch}"], cwd=Path.cwd())
+    if args.agent:
+        agent.cli_for(args.agent)  # fail before cloning, not after the recipes
+
+
+def main(argv: list[str] | None = None) -> int:
     try:
+        args = build_parser().parse_args(argv)
+        if args.command == "doctor":
+            return cmd_doctor(args)
+        _validate_migrate(args)
         return cmd_migrate(args)
-    except ModError as exc:
+    except (ModError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

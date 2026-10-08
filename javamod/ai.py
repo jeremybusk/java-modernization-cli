@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import json
 import re
+from itertools import islice
 from pathlib import Path
 
 from . import buildcheck, triage
-from .discover import BuildRoot
+from .discover import BuildRoot, _module_dirs, java_sources
 from .errors import ModError
 
 DEFAULT_MODEL = "claude-sonnet-5"
@@ -42,13 +43,24 @@ def _ask_for_files(client, model: str, system: str, user: str) -> dict[str, str]
     response = client.messages.create(
         model=model, max_tokens=8192, system=system, messages=[{"role": "user", "content": user}],
     )
+    if getattr(response, "stop_reason", None) == "max_tokens":
+        raise ModError("the model response was truncated; no files were changed")
     text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
     text = re.sub(r"^```[a-z]*\n|\n```$", "", text.strip())
     try:
         items = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ModError(f"the model did not return valid JSON: {exc}") from exc
-    return {item["path"]: item["content"] for item in items if item.get("path")}
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        raise ModError("the model must return a JSON array of file objects")
+    files = {}
+    for item in items:
+        if not item.get("path"):
+            continue
+        if not isinstance(item["path"], str) or not isinstance(item.get("content"), str):
+            raise ModError("each model file needs a string path and string content")
+        files[item["path"]] = item["content"]
+    return files
 
 
 def implicated_files(build: BuildRoot, output: str, limit: int = 12) -> list[str]:
@@ -73,7 +85,7 @@ def implicated_files(build: BuildRoot, output: str, limit: int = 12) -> list[str
 def fix_build(build: BuildRoot, result: buildcheck.BuildResult, *, model: str, max_iterations: int,
               run_tests: bool, skip_tests: list[str] = (), log=print) -> buildcheck.BuildResult:
     """Iteratively ask the model to fix a failing build, rebuilding each time."""
-    client = _client()
+    client = None
     for attempt in range(1, max_iterations + 1):
         implicated = implicated_files(build, result.output)
         if not implicated:
@@ -86,6 +98,8 @@ def fix_build(build: BuildRoot, result: buildcheck.BuildResult, *, model: str, m
                 files[rel] = path.read_text(encoding="utf-8", errors="ignore")
         if not files:
             return result
+        if client is None:
+            client = _client()
         log(f"ai: build fix attempt {attempt}/{max_iterations} on {len(files)} file(s)")
         user = (
             "This Java build is failing after an automated modernization pass. "
@@ -102,6 +116,9 @@ def fix_build(build: BuildRoot, result: buildcheck.BuildResult, *, model: str, m
         if not fixes:
             return result
         for rel, content in fixes.items():
+            if rel not in files:
+                log(f"ai: ignoring a rewrite of a file not supplied to the model: {rel}")
+                continue
             target = (build.path / rel).resolve()
             if not target.is_relative_to(build.path.resolve()):
                 log(f"ai: ignoring a rewrite outside the build: {rel}")
@@ -119,10 +136,9 @@ SOURCE_DIRS = ("src/main/java", "src/test/java")
 def modernize_tree(build: BuildRoot, *, target_java: int, model: str, max_files: int, log=print) -> list[str]:
     """Ask the model to modernize each source file toward *target_java*. Returns changed paths."""
     client = _client()
-    files = [
-        p for sub in SOURCE_DIRS for p in (build.path / sub).rglob("*.java")
-        if p.is_file() and p.stat().st_size <= MAX_FILE_BYTES
-    ][:max_files]
+    files = islice((p for directory in _module_dirs(build.path, build.tool)
+                    for sub in SOURCE_DIRS for p in java_sources(directory / sub)
+                    if p.stat().st_size <= MAX_FILE_BYTES), max_files)
     system = (
         f"You modernize Java source to idiomatic Java {target_java}: var where it reads better, "
         "text blocks, switch expressions, pattern matching, records where appropriate, and removal of "
@@ -137,6 +153,8 @@ def modernize_tree(build: BuildRoot, *, target_java: int, model: str, max_files:
             model=model, max_tokens=8192, system=system,
             messages=[{"role": "user", "content": original}],
         )
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise ModError(f"the model response for {path.relative_to(build.path)} was truncated; file unchanged")
         text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
         text = re.sub(r"^```[a-z]*\n|\n```$", "", text.strip())
         if text and text != original:
