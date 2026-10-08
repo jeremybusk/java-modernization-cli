@@ -56,7 +56,7 @@ or the other is enough.
 | --- | --- | --- | --- |
 | `claude` | `claude --permission-mode acceptEdits --allowedTools ... -p <prompt>` | `.claude/skills/` | Edits, plus only `mvn`/`./mvnw`/`gradle`/`./gradlew` and read-only `git status`/`git diff` in the shell |
 | `codex` | `codex exec --sandbox workspace-write -c sandbox_workspace_write.network_access=true <prompt>` | `.agents/skills/` | Writes limited to the clone; network on so Maven/Gradle can resolve dependencies |
-| `copilot` | `copilot --allow-all-tools -p <prompt>` | `.github/skills/` | All tools (the Copilot CLI has no narrower non-interactive mode) |
+| `copilot` | `copilot --allow-all-tools -p <prompt>` | `.github/skills/` | All tools; this integration selects `--allow-all-tools` |
 | `copilot-modernize-java` | `copilot --allow-all-tools --agent modernize-java:modernize-java -p <prompt>` | `.github/skills/` | Same as `copilot`; see the Microsoft section below |
 
 Guardrails common to all of them:
@@ -159,23 +159,25 @@ prefer a local directory or a built-in for anything you rely on.
 Source: https://github.com/microsoft/modernize-java
 (the agent itself: [plugins/modernize-java](https://github.com/microsoft/modernize-java/tree/main/plugins/modernize-java))
 
+In this repo it is useful only through `--agent copilot-modernize-java`,
+which requires an installed, authenticated Copilot CLI and the upstream
+plugin. The default OpenRewrite engine and the other agents do not use it.
+The two built-in `SKILL.md` packages above work with Claude Code, Codex,
+and Copilot; they are separate from Microsoft's Copilot plugin.
+
 ### What it is
 
 This is not a skill. It is a complete upgrade agent ("GitHub Copilot
 modernization – Java Upgrade CLI Plugin") packaged for the GitHub Copilot
 CLI. It analyzes the project, writes an upgrade plan, applies it, fixes
 build and test failures until the build passes, scans for CVEs, and writes a
-summary. It is made up of:
+summary. It is a Copilot plugin with an agent definition and runtime tool
+configuration, rather than a portable `SKILL.md`. The upstream README
+documents telemetry. Check the installed plugin's manifest for its current
+runtime dependencies and telemetry configuration; internal paths and hooks
+may change between releases.
 
-* `com.github.copilot/agents/modernize-java.agent.md` -- a Copilot-format
-  agent definition (not a portable `SKILL.md`);
-* `mcp.json` -- starts `@microsoft/github-copilot-app-modernization-mcp-server`
-  via `npx`, a closed-source MCP server that supplies the planning,
-  upgrade and CVE tools the agent depends on;
-* telemetry hooks (`sendTelemetry.sh`) on prompt submit, subagent start and
-  stop, and errors.
-
-### Why it isn't a built-in here
+### Why it is an optional agent rather than a built-in skill
 
 * **It does javamod's job, not a piece of it.** Planning, applying the
   upgrade, the fix-the-build loop and the summary all overlap with what
@@ -185,17 +187,18 @@ summary. It is made up of:
 * **Copilot CLI only.** The agent file and the plugin format are
   Copilot-specific. It can't be installed into Claude Code or Codex the way
   a portable skill can.
-* **License.** Its README forbids decompiling, modifying, repackaging or
-  redistributing "any assets, prompts, or internal tools", so javamod can't
-  vendor, pin or copy it the way it does the built-in skills. It can only
-  invoke an install you made yourself.
-* **Closed, unpinned runtime pieces.** The MCP server is fetched from npm at
-  run time, and the behavior comes from code you can't review.
-* **Telemetry.** Its hooks send usage data to Microsoft, which a
-  modernization tool that otherwise runs fully local shouldn't do by
-  default.
-* **Needs a GitHub Copilot subscription**, on top of whatever the rest of
-  the run uses.
+* **Separate runtime.** javamod does not pin or manage the installed
+  Copilot plugin and its runtime tools.
+* **Telemetry.** The upstream README documents usage telemetry; selecting
+  this integration is optional.
+* **Needs authenticated Copilot access**, on top of the build prerequisites.
+
+The upstream repository's [LICENSE](https://github.com/microsoft/modernize-java/blob/main/LICENSE)
+is MIT. Its README also has a disclaimer qualified by applicable licenses.
+Separately distributed runtime tools
+may have their own terms; the repository license alone does not establish
+those terms. The integration remains optional because of its Copilot
+dependency and overlapping workflow.
 
 ### Where it does fit
 
@@ -219,6 +222,40 @@ summary. It is made up of:
 
 For Claude Code or Codex, use `--agent claude` / `--agent codex` with the
 portable skills above instead.
+
+## Microsoft github-copilot-modernization
+
+[github-copilot-modernization](https://github.com/microsoft/github-copilot-modernization)
+is a broader Copilot CLI orchestrator for Java/.NET upgrades, Azure migration,
+security fixes, and architecture changes. It uses specialized agents,
+generates plans/reports, and preserves per-task commits. `modernize-java`
+focuses on Java upgrades. Both packaged plugins require the Copilot CLI;
+neither is a replacement for this repo's default OpenRewrite engine.
+
+For javamod's Java upgrade stage, keep `copilot-modernize-java` as the
+dedicated preset. Use the broader orchestrator separately when you want its
+assessment, cloud, or architecture workflows:
+
+```bash
+copilot plugin marketplace add microsoft/github-copilot-modernization
+copilot plugin install github-copilot-modernization@github-copilot-modernization
+copilot --agent=github-copilot-modernization:modernize
+```
+
+The existing passthrough also lets you select it for an experiment after
+installation, without another hardcoded preset:
+
+```bash
+javamod migrate --source ./my-app --dest-branch modernize-java21 --local-only \
+  --java 21 --boot 3.5 --agent copilot --agent-on failure \
+  --agent-arg=--agent=github-copilot-modernization:modernize
+```
+
+This combination has not been tested with the live plugin. Its generated
+plans/reports and per-task commits need reconciliation with javamod's
+edit-only prompt and single-commit handling. javamod's own formatter and
+build check still run afterward. Validate those interactions before adding
+a dedicated preset; the repository link alone is not a runtime dependency.
 
 ## Requirements for adding a new built-in skill
 
