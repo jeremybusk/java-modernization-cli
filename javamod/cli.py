@@ -15,7 +15,7 @@ import tempfile
 import urllib.parse
 from pathlib import Path
 
-from . import ai, buildcheck, discover, gitrepo, openrewrite, recipes
+from . import ai, buildcheck, discover, formatting, gitrepo, openrewrite, recipes
 from .envutil import env_default
 from .errors import ModError
 from .report import RunReport
@@ -89,6 +89,9 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--ai-max-files", type=int, default=env_default("JAVAMOD_AI_MAX_FILES", 40, int))
 
     migrate.add_argument("--skip-build", action="store_true", help="skip compiling/testing the result")
+    migrate.add_argument("--skip-format", action="store_true",
+                          help="don't run the project's own formatter (spring-javaformat/Spotless) after migrating, "
+                               "even if one is detected")
     migrate.add_argument("--skip-tests", action="store_true", help="compile only; don't run the test suite")
     migrate.add_argument("--shallow", action="store_true", help="shallow-clone a remote source (loses history)")
     migrate.add_argument("--allow-dirty", action="store_true", help="allow a local source with uncommitted changes")
@@ -171,6 +174,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             )
         if args.engine == "ai":
             ai.modernize_tree(build, target_java=args.java, model=args.ai_model, max_files=args.ai_max_files, log=log)
+        if not args.skip_format:
+            formatting.reconcile(build, log=log)
 
         build_result = None
         if not args.skip_build:

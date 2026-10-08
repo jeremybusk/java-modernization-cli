@@ -12,8 +12,11 @@ plus a branch), and it will:
 3. apply a plan of OpenRewrite recipes built for that target (Java version
    upgrade, Jakarta namespace, JUnit 4→5, dependency cleanup, static-analysis
    best practices), and/or an AI finishing pass,
-4. compile (and by default test) the result,
-5. commit it to a branch, and push that branch to the destination.
+4. reconcile formatting with the project's own enforced formatter, if it has
+   one (spring-javaformat, Spotless) -- otherwise a correct migration can
+   still fail validation on style alone,
+5. compile (and by default test) the result,
+6. commit it to a branch, and push that branch to the destination.
 
 It is designed to need **as little per-repo configuration as possible**:
 every tunable has a built-in default, every tunable can also be set with a
@@ -109,6 +112,7 @@ and `ANTHROPIC_API_KEY` set.
 | `--engine` | `JAVAMOD_ENGINE` | `openrewrite` | `openrewrite`, `hybrid` (+ AI build-fix pass), or `ai` (AI only). |
 | `--ai-model` | `JAVAMOD_AI_MODEL` | `claude-sonnet-5` | Model for `hybrid`/`ai`. |
 | `--skip-build` / `--skip-tests` | — | off | Skip compiling, or compile without running tests. |
+| `--skip-format` | — | off | Don't run the project's own formatter (spring-javaformat/Spotless) after migrating, even if detected. |
 | `--execute` | — | off (plan + local commit only) | Actually push to `--dest`. |
 | `--local-only` | — | off | Commit locally; never push, even with `--execute`. |
 | `--provider` | `JAVAMOD_PROVIDER` | auto-detected from the URL host | `github`/`gitlab`, selects `GH_TOKEN`/`GITLAB_TOKEN` for an HTTPS push. |
