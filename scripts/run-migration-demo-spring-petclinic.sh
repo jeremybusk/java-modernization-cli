@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 javamod migrate \
   --source git@github.com:jeremybusk/spring-petclinic.git#main \
   --verbose \

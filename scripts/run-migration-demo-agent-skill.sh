@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 javamod migrate \
   --source git@github.com:sqshq/piggymetrics#master \
   --verbose \
