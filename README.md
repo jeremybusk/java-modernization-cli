@@ -87,19 +87,35 @@ It also changes two defaults on purpose:
 ## Prerequisites
 
 `javamod` itself is pure-Python stdlib. Running an actual migration needs
-`git`, a JDK (`javac` included) for the target version, and Maven or Gradle
-(the project's own wrapper is used automatically if present). This is built
+`git`, a JDK (`javac` included) for the target version, and system Maven
+3.6.1+ or a compatible Gradle (8.5+ when running on Java 21; 9.1+ for Java
+25). OpenRewrite uses the system tool; build validation and formatting
+prefer the project's wrapper, whose version must also support the JDK. This is built
 and tested against **Ubuntu/Debian**:
 
 ```bash
-./scripts/bootstrap.sh      # installs anything missing via apt-get, then
-                             # creates .venv and pip-installs javamod into it
+./scripts/bootstrap.sh      # installs prerequisites and sets up .venv
+source .venv/bin/activate
 ```
 
 or open the repo in the included [devcontainer](.devcontainer/devcontainer.json)
 (a Microsoft `devcontainers/java` image with Maven, Gradle, and the GitHub
 CLI preinstalled) if you'd rather not touch the host at all. Either way,
-`javamod doctor` tells you what's missing and how to get it.
+`javamod doctor` reports versions and JDK compatibility. Use
+`javamod doctor --build-tool gradle --java 21` to require a specific tool.
+In auto mode either compatible build tool is sufficient; optional tools
+do not affect the exit status.
+
+Ubuntu's packaged Gradle can be too old for modern JDKs. Bootstrap keeps a
+compatible Gradle already on PATH; otherwise it downloads Gradle 8.14.5
+(9.7.1 for Java 25), verifies its published SHA-256 checksum, and installs
+it under `.venv/tools` with a command in `.venv/bin`. Activate the venv to
+use it. Set `JAVAMOD_GRADLE_VERSION` to select another stable release when
+installation is needed. Bootstrap prints the `JAVA_HOME` export needed in
+new terminals; it preserves system Gradle and project wrappers.
+See the [Gradle Java compatibility matrix](https://docs.gradle.org/current/userguide/compatibility.html)
+and [Maven 3.6.1 release notes](https://maven.apache.org/docs/3.6.1/release-notes.html)
+for the version requirements.
 
 `--engine ai` / `--engine hybrid` additionally need `pip install anthropic`
 and `ANTHROPIC_API_KEY` set.
