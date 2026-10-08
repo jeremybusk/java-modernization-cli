@@ -112,6 +112,54 @@ class SpringBootParentDetectionTests(unittest.TestCase):
 
 
 class BuildRootSelectionTests(unittest.TestCase):
+    def test_mixed_builds_require_an_explicit_tool(self):
+        for gradle_file in ("build.gradle", "build.gradle.kts"):
+            with self.subTest(gradle_file=gradle_file), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "pom.xml").write_text(MAVEN_POM)
+                (root / gradle_file).write_text("")
+                with self.assertRaisesRegex(ModError, "--build-tool"):
+                    discover.find_build_root(root, None)
+
+    def test_gradle_selection_ignores_invalid_alternate_pom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pom.xml").write_text("unparseable alternate build file")
+            (root / "build.gradle").write_text(GRADLE_BUILD)
+            build = discover.find_build_root(root, None, build_tool="gradle")
+            self.assertEqual(build.tool, "gradle")
+            self.assertEqual(build.current_java, 8)
+            self.assertIn("pom.xml", build.warnings[0])
+            self.assertIn("before", build.warnings[0])
+            self.assertEqual((root / "pom.xml").read_text(), "unparseable alternate build file")
+
+    def test_maven_selection_reports_alternate_gradle_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pom.xml").write_text(MAVEN_POM)
+            (root / "build.gradle.kts").write_text("")
+            build = discover.find_build_root(root, ".", build_tool="maven")
+            self.assertEqual(build.tool, "maven")
+            self.assertIn("build.gradle.kts", build.warnings[0])
+
+    def test_requested_tool_must_exist_at_selected_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pom.xml").write_text(MAVEN_POM)
+            with self.assertRaisesRegex(ModError, "no gradle build file"):
+                discover.find_build_root(root, None, build_tool="gradle")
+
+    def test_nested_mixed_builds_can_be_selected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = root / "app"
+            app.mkdir()
+            (app / "pom.xml").write_text(MAVEN_POM)
+            (app / "build.gradle").write_text(GRADLE_BUILD)
+            with self.assertRaisesRegex(ModError, "--build-tool"):
+                discover.find_build_root(root, None)
+            self.assertEqual(discover.find_build_root(root, None, build_tool="gradle").path, app)
+
     def test_build_root_cannot_escape_via_parent_or_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"

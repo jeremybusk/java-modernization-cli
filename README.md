@@ -113,6 +113,7 @@ and `ANTHROPIC_API_KEY` set.
 | `--dest` | `JAVAMOD_DEST` | *(required unless `--local-only`)* | Existing Git URL or local repo (ideally bare: `git init --bare`) to push to. |
 | `--dest-branch` | `JAVAMOD_DEST_BRANCH` | *(required)* | Branch created/updated locally and, unless `--local-only`, at `--dest`. |
 | `--build-root` | — | repo root | Path to the Maven/Gradle build, for monorepos with more than one. |
+| `--build-tool` | `JAVAMOD_BUILD_TOOL` | `auto` | Select `maven` or `gradle`. Auto stops for a directory containing both tools' build files. |
 | `--java` | `JAVAMOD_JAVA` | `21` | Target Java version: 11, 17, 21, or 25. |
 | `--boot` | `JAVAMOD_BOOT` | *(none)* | Target Spring Boot, e.g. `3.5` or `4.0`; only applied if Spring Boot is detected. |
 | `--profile` | `JAVAMOD_PROFILE` | `standard` | `conservative` (Java upgrade only), `standard` (+ test modernization, static-analysis cleanup, build best practices), `aggressive` (+ dependency version upgrades). |
@@ -141,6 +142,14 @@ and `ANTHROPIC_API_KEY` set.
 
 Run `javamod migrate --help` for the complete, current list (it's the
 source of truth; this table summarizes it).
+
+If a project contains both `pom.xml` and `build.gradle`/`build.gradle.kts`,
+select its active tool explicitly, for example `--build-tool gradle`.
+javamod reports alternate build files on stderr and in JSON `build_warnings`.
+It does not infer that those files are obsolete or delete them. Check the
+project's CI, build scripts, and documentation before removing an old build
+definition; a project may intentionally support both tools. This check
+covers build definitions, not general unused-code detection.
 
 ### Crossing Spring Boot major versions
 
