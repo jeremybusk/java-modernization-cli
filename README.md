@@ -181,6 +181,10 @@ javamod migrate --source ./svc-b --dest-branch modernize-java21 --local-only
 
 ## Further reading
 
+* [docs/openrewrite-overview.md](docs/openrewrite-overview.md) -- what
+  OpenRewrite actually is, which recipe modules javamod uses, and a verified
+  note on Moderne's Code Genome Project and whether skipping it costs you
+  anything.
 * [docs/residual-issue-triage.md](docs/residual-issue-triage.md) -- what
   happens when the build still fails after migration: how issues are
   classified, the YAML/JSON schema, and how to add a new verified pattern.
