@@ -78,6 +78,16 @@ Guardrails common to all of them:
   reported, not fatal; whatever the agent changed still goes through the
   build check.
 
+## When it runs: `--agent-on always|failure`
+
+`always` (the default) runs the agent right after the recipes, which is
+what you want for skills like `modern-java` that improve code that already
+builds. `failure` runs javamod's build check first and calls the agent only
+if it fails, with that failure included in the first prompt. When the
+recipes alone produce a passing build, no agent pass runs and nothing is
+spent. `failure` needs the build check, so it can't be combined with
+`--skip-build`.
+
 ## Retries: `--agent-retries N`
 
 The agent already loops on its own: it runs the build, fixes, and reruns.

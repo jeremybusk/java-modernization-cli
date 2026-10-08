@@ -138,5 +138,65 @@ class BuildRootSelectionTests(unittest.TestCase):
             self.assertEqual(build.path, (root / "service-a").resolve())
 
 
+class VersionAndModuleTests(unittest.TestCase):
+    def _maven(self, root: Path, properties: str = "", modules: str = "", deps: str = "") -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "pom.xml").write_text(
+            '<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion>'
+            f"<properties>{properties}</properties><modules>{modules}</modules>"
+            f"<dependencies>{deps}</dependencies></project>", encoding="utf-8")
+
+    def test_two_digit_java_versions_are_not_truncated(self):
+        for value, expected in (("1.8", 8), ("11", 11), ("17", 17), ("21", 21)):
+            with tempfile.TemporaryDirectory() as tmp:
+                self._maven(Path(tmp), properties=f"<java.version>{value}</java.version>")
+                self.assertEqual(discover.find_build_root(Path(tmp), None).current_java, expected, value)
+
+    def test_gradle_java_version_constant(self):
+        for value, expected in (("VERSION_1_8", 8), ("VERSION_11", 11), ("VERSION_17", 17)):
+            with tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / "build.gradle").write_text(f"sourceCompatibility = JavaVersion.{value}\n")
+                self.assertEqual(discover.find_build_root(Path(tmp), None).current_java, expected, value)
+
+    def test_maven_modules_contribute_dependencies_and_imports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._maven(root, properties="<guava.version>29.0-jre</guava.version>",
+                        modules="<module>svc</module>")
+            self._maven(root / "svc", deps="<dependency><groupId>com.google.guava</groupId>"
+                                           "<artifactId>guava</artifactId><version>${guava.version}</version></dependency>")
+            test = root / "svc/src/test/java/a/ATest.java"
+            test.parent.mkdir(parents=True)
+            test.write_text("package a;\nimport org.junit.Test;\nimport static org.mockito.Mockito.mock;\n"
+                            "import javax.persistence.Entity;\nimport javax.crypto.Cipher;\nclass ATest {}\n")
+            # A pom.xml that's a test fixture, not a module, must not be read.
+            fixture = root / "svc/src/test/resources/pom.xml"
+            fixture.parent.mkdir(parents=True)
+            fixture.write_text("not xml at all")
+            build = discover.find_build_root(root, None)
+        self.assertEqual({"guava", "junit4", "mockito", "javax"} - build.features, set())
+        self.assertIn(discover.Dependency("com.google.guava", "guava", "29.0-jre"), build.dependencies)
+
+    def test_jdk_javax_and_junit5_imports_do_not_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._maven(root)
+            source = root / "src/test/java/a/ATest.java"
+            source.parent.mkdir(parents=True)
+            source.write_text("import javax.crypto.Cipher;\nimport org.junit.jupiter.api.Test;\nclass ATest {}\n")
+            build = discover.find_build_root(root, None)
+        self.assertEqual(build.features & {"javax", "junit4"}, set())
+        self.assertIn("junit5", build.features)
+
+    def test_gradle_subprojects_contribute_dependencies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "build.gradle").write_text("")
+            (root / "app").mkdir()
+            (root / "app/build.gradle").write_text("dependencies { implementation 'com.google.guava:guava:29.0-jre' }\n")
+            build = discover.find_build_root(root, None)
+        self.assertIn("guava", build.features)
+
+
 if __name__ == "__main__":
     unittest.main()

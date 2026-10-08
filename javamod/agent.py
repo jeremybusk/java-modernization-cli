@@ -154,7 +154,7 @@ def _skipped_note(skip_tests: list[str]) -> list[str]:
 
 
 def build_prompt(build: BuildRoot, repo: Path, applied_recipes: list[str], *, target_java: int, boot: str | None,
-                 skills: list[str], run_tests: bool, skip_tests: list[str] = ()) -> str:
+                 skills: list[str], run_tests: bool, skip_tests: list[str] = (), failure: str | None = None) -> str:
     root = build.path.relative_to(repo).as_posix()
     goal = "test" if run_tests else ("test-compile" if build.tool == "maven" else "testClasses")
     recipes = "\n".join(f"  - {name}" for name in applied_recipes) or "  (none)"
@@ -165,6 +165,8 @@ def build_prompt(build: BuildRoot, repo: Path, applied_recipes: list[str], *, ta
         f"These OpenRewrite recipes have already been applied:\n{recipes}",
         *(["Use these installed skills where they apply: " + ", ".join(skills) + "."] if skills else []),
         *_skipped_note(list(skip_tests)),
+        *([f"The calling tool's build check currently fails; the relevant part of its output:\n\n{failure}"]
+          if failure else []),
         "",
         "Finish the job:",
         f"1. Run the build ({build.tool} {goal}) and fix whatever fails, preserving behavior and public API.",

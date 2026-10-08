@@ -32,7 +32,8 @@ had their turn. There's nothing to configure to turn it on.
    pipeline; see the `--report` field below instead).
 2. **A YAML file.** `--issues PATH` (default: `<workdir>/remaining-issues.yaml`,
    next to the kept, failed checkout). Pass `--issues -` to write it to
-   stdout instead, the same convention `--report -` uses.
+   stdout instead, the same convention `--report -` uses (but not both at
+   once: javamod refuses, since the report already carries the issues).
 3. **The JSON run report**, as a `residual_issues` field, whenever `--report`
    is used -- so a CI pipeline gets the same structured data without
    scraping terminal output or a second file.

@@ -1,7 +1,10 @@
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from javamod import ai
+from javamod.discover import BuildRoot
 
 
 class FakeClient:
@@ -30,11 +33,32 @@ class AskForFilesTests(unittest.TestCase):
         self.assertEqual(result, {"B.java": "class B {}"})
 
 
-class FileErrorRegexTests(unittest.TestCase):
-    def test_matches_typical_javac_error_lines(self):
-        output = "src/main/java/com/example/App.java:42: error: cannot find symbol\nmore noise"
-        matches = [m.group("path") for m in ai.FILE_ERROR_RE.finditer(output)]
-        self.assertEqual(matches, ["src/main/java/com/example/App.java"])
+class ImplicatedFilesTests(unittest.TestCase):
+    def _build(self, tmp: Path, tool: str) -> BuildRoot:
+        source = tmp / "src/main/java/com/example/App.java"
+        source.parent.mkdir(parents=True)
+        source.write_text("class App {}", encoding="utf-8")
+        return BuildRoot(path=tmp, tool=tool)
+
+    def test_maven_error_lines_with_absolute_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build = self._build(Path(tmp), "maven")
+            output = (f"[ERROR] {tmp}/src/main/java/com/example/App.java:[42,7] cannot find symbol\n"
+                      f"[ERROR] {tmp}/src/main/java/com/example/App.java:[50,1] cannot find symbol\n"
+                      "[ERROR] /elsewhere/Other.java:[1,1] outside the build\n")
+            self.assertEqual(ai.implicated_files(build, output), ["src/main/java/com/example/App.java"])
+
+    def test_gradle_error_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build = self._build(Path(tmp), "gradle")
+            output = f"{tmp}/src/main/java/com/example/App.java:42: error: cannot find symbol\n"
+            self.assertEqual(ai.implicated_files(build, output), ["src/main/java/com/example/App.java"])
+
+    def test_failing_tests_are_not_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build = self._build(Path(tmp), "maven")
+            output = "[ERROR] Failures:\n[ERROR]   AppTest.works:3 expected: <1> but was: <2>\n[INFO]\n"
+            self.assertEqual(ai.implicated_files(build, output), [])
 
 
 if __name__ == "__main__":

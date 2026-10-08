@@ -5,7 +5,6 @@ javamod migrate \
   --agent claude --agent-skill modern-java \
   --dest   git@github.com:jeremybusk/java-piggymetrics.git \
   --dest-branch modernize-java21-ai \
-  --issues - \
   --report - \
   --agent-retries 1 \
   --skip-test ExchangeRatesClientTest\

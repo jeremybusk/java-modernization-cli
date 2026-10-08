@@ -55,6 +55,29 @@ class MigrateArgumentValidationTests(unittest.TestCase):
 
 
 class AgentArgumentValidationTests(unittest.TestCase):
+    def test_report_and_issues_cannot_both_use_stdout(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            code = cli.main(["migrate", "--source", ".", "--dest-branch", "b", "--local-only",
+                             "--report", "-", "--issues", "-"])
+        self.assertEqual(code, 2)
+        self.assertIn("residual_issues", err.getvalue())
+
+    def test_agent_on_failure_needs_the_build(self):
+        with mock.patch("javamod.agent.cli_for"), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["migrate", "--source", ".", "--dest-branch", "b", "--local-only",
+                             "--agent", "claude", "--agent-on", "failure", "--skip-build"])
+        self.assertEqual(code, 2)
+
+    @mock.patch("javamod.openrewrite.run", return_value=True)
+    def test_boot_target_without_spring_boot_warns(self, _mock_rewrite):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = make_source_repo(Path(tmp))
+            with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
+                code = cli.main(["migrate", "--source", str(source), "--dest-branch", "b", "--local-only",
+                                 "--skip-build", "--boot", "3.5", "--workdir", str(Path(tmp) / "w")])
+        self.assertEqual(code, 0)
+        self.assertIn("--boot 3.5 ignored", err.getvalue())
+
     def test_agent_skill_requires_agent(self):
         with contextlib.redirect_stderr(io.StringIO()):
             code = cli.main(["migrate", "--source", ".", "--dest-branch", "b", "--local-only",
@@ -102,6 +125,22 @@ class AgentRetryTests(unittest.TestCase):
             code, run, _validate = self._migrate(Path(tmp), [False], retries=0)
         self.assertEqual(code, 1)
         self.assertEqual(run.call_count, 1)
+
+    def test_agent_on_failure_skips_the_agent_when_recipes_suffice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, run, _validate = self._migrate(Path(tmp), [True], retries=2, extra=("--agent-on", "failure"))
+        self.assertEqual(code, 0)
+        run.assert_not_called()
+
+    def test_agent_on_failure_runs_with_the_failure_then_retries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, run, _validate = self._migrate(Path(tmp), [False, False, True], retries=1,
+                                                 extra=("--agent-on", "failure"))
+        self.assertEqual(code, 0)
+        self.assertEqual(run.call_count, 2)  # first pass on failure + 1 retry
+        first, retry = (c.args[1] for c in run.call_args_list)
+        self.assertIn("currently fails", first)
+        self.assertIn("Follow-up pass 1", retry)
 
     def test_skip_test_reaches_the_build_check_and_the_commit(self):
         with tempfile.TemporaryDirectory() as tmp:

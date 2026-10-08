@@ -116,6 +116,7 @@ and `ANTHROPIC_API_KEY` set.
 | `--agent-model` | `JAVAMOD_AGENT_MODEL` | the CLI's default | Passed to the agent CLI's `--model`. |
 | `--agent-arg` | — | — | Extra argument for the agent CLI, repeatable (`--agent-arg=--flag`). |
 | `--agent-timeout` | `JAVAMOD_AGENT_TIMEOUT` | `3600` | Seconds before each agent pass is stopped. |
+| `--agent-on` | `JAVAMOD_AGENT_ON` | `always` | `always`: run the agent after the recipes. `failure`: only if javamod's build check fails after them (saves an agent pass when the recipes were enough). |
 | `--agent-retries` | `JAVAMOD_AGENT_RETRIES` | `0` | If javamod's build check still fails after the agent, give it up to this many more passes with that failure output. |
 | `--skip-build` / `--skip-tests` | — | off | Skip compiling, or compile without running tests. |
 | `--skip-test` | `JAVAMOD_SKIP_TESTS` (comma-separated) | — | Exclude a test class from the build check, repeatable; for tests confirmed to fail for reasons outside the migration (e.g. a live external service). Recorded in the report and commit message. |
@@ -125,6 +126,7 @@ and `ANTHROPIC_API_KEY` set.
 | `--provider` | `JAVAMOD_PROVIDER` | auto-detected from the URL host | `github`/`gitlab`, selects `GH_TOKEN`/`GITLAB_TOKEN` for an HTTPS push. |
 | `--workdir` | — | a temp dir | Persist the working clone here instead of deleting it. |
 | `--report` | — | — | Write the JSON run report here, or `-` for stdout (CI-friendly). |
+| `--diff-stat-lines` | `JAVAMOD_DIFF_STAT_LINES` | `25` | Max changed-file lines in the printed summary; `0` for all. The JSON report always has the full list. |
 | `--quiet` | — | off | Suppress the human-readable summary; pairs with `--report -` for clean machine-readable stdout. |
 
 Run `javamod migrate --help` for the complete, current list (it's the
@@ -217,7 +219,6 @@ javamod migrate \
   --source git@github.com:acme/legacy-app.git#main \
   --dest   git@github.com:acme/legacy-app.git \
   --dest-branch modernize-java21 \
-  --issues - \
   --report - \
   --verbose \
   --java 21 --boot 3.5 --profile aggressive --execute

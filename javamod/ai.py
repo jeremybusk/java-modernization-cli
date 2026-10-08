@@ -19,12 +19,11 @@ import json
 import re
 from pathlib import Path
 
-from . import buildcheck
+from . import buildcheck, triage
 from .discover import BuildRoot
 from .errors import ModError
 
 DEFAULT_MODEL = "claude-sonnet-5"
-FILE_ERROR_RE = re.compile(r"^(?P<path>[\w./\\-]+\.java):\[?(?P<line>\d+)", re.MULTILINE)
 MAX_FILE_BYTES = 60_000
 
 
@@ -52,12 +51,31 @@ def _ask_for_files(client, model: str, system: str, user: str) -> dict[str, str]
     return {item["path"]: item["content"] for item in items if item.get("path")}
 
 
+def implicated_files(build: BuildRoot, output: str, limit: int = 12) -> list[str]:
+    """Source files the compiler blamed, relative to the build root.
+
+    Reuses triage's parsers, which know Maven's ``[ERROR] /abs/File.java:[l,c]``
+    and Gradle's ``/abs/File.java:l: error:`` shapes; failing *tests* are
+    reported by class.method, not a file, so they're skipped here.
+    """
+    root = build.path.resolve()
+    files: list[str] = []
+    for issue in triage.parse_build_failures(build.tool, output):
+        path = Path(issue["file"])
+        path = (path if path.is_absolute() else root / path).resolve()
+        if path.suffix == ".java" and path.is_relative_to(root) and path.is_file():
+            rel = path.relative_to(root).as_posix()
+            if rel not in files:
+                files.append(rel)
+    return files[:limit]
+
+
 def fix_build(build: BuildRoot, result: buildcheck.BuildResult, *, model: str, max_iterations: int,
               run_tests: bool, skip_tests: list[str] = (), log=print) -> buildcheck.BuildResult:
     """Iteratively ask the model to fix a failing build, rebuilding each time."""
     client = _client()
     for attempt in range(1, max_iterations + 1):
-        implicated = sorted({m.group("path") for m in FILE_ERROR_RE.finditer(result.output)})[:12]
+        implicated = implicated_files(build, result.output)
         if not implicated:
             log("ai: build failed with no .java file references to act on; stopping")
             return result
@@ -84,7 +102,11 @@ def fix_build(build: BuildRoot, result: buildcheck.BuildResult, *, model: str, m
         if not fixes:
             return result
         for rel, content in fixes.items():
-            (build.path / rel).write_text(content, encoding="utf-8")
+            target = (build.path / rel).resolve()
+            if not target.is_relative_to(build.path.resolve()):
+                log(f"ai: ignoring a rewrite outside the build: {rel}")
+                continue
+            target.write_text(content, encoding="utf-8")
         result = buildcheck.validate(build, run_tests=run_tests, skip_tests=skip_tests)
         if result.ok:
             return result

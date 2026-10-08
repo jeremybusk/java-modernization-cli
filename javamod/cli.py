@@ -101,6 +101,9 @@ def build_parser() -> argparse.ArgumentParser:
                           help="extra argument passed through to the agent CLI, repeatable (use --agent-arg=--flag)")
     migrate.add_argument("--agent-timeout", type=int, default=env_default("JAVAMOD_AGENT_TIMEOUT", 3600, int),
                           help="seconds before each agent pass is stopped (default: %(default)s)")
+    migrate.add_argument("--agent-on", default=env_default("JAVAMOD_AGENT_ON", "always"), choices=("always", "failure"),
+                          help="always (default): run the agent after the recipes. failure: only if javamod's build "
+                               "check fails after them, saving an agent pass when the recipes were enough")
     migrate.add_argument("--agent-retries", type=int, default=env_default("JAVAMOD_AGENT_RETRIES", 0, int),
                           help="if javamod's own build check still fails after the agent, give the agent up to this "
                                "many more passes with that failure output (default: %(default)s)")
@@ -132,6 +135,9 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--issues", default=None,
                           help="if the build still fails, write the residual-issue triage YAML here, or '-' for "
                                "stdout; default: <workdir>/remaining-issues.yaml")
+    migrate.add_argument("--diff-stat-lines", type=int, default=env_default("JAVAMOD_DIFF_STAT_LINES", 25, int),
+                          help="max changed-file lines in the printed summary, 0 for all (the JSON report always "
+                               "has the full list; default: %(default)s)")
     migrate.add_argument("--quiet", action="store_true", help="suppress the human-readable summary (pairs with --report -)")
     migrate.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation before pushing")
     migrate.add_argument("-v", "--verbose", action="store_true")
@@ -191,6 +197,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         log(f"{build.tool} build at {build.path.relative_to(src_path)}"
             f" (current Java: {build.current_java or 'unknown'}, features: {sorted(build.features) or 'none detected'})")
         gitrepo.ignore_build_outputs(src_path, build.path, build.tool)
+        if args.boot and not build.spring_boot and not args.quiet:
+            print(f"warning: --boot {args.boot} ignored: no Spring Boot detected in this build", file=sys.stderr)
 
         branch = args.dest_branch
         gitrepo.ensure_branch(src_path, branch)
@@ -218,11 +226,14 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             agent_log = (workdir / "agent-transcript.log" if persistent or args.keep
                          else Path(tempfile.mkstemp(prefix="javamod-agent-", suffix=".log")[1]))
             agent_skills = agent.install(src_path, args.agent, args.agent_skill, workdir / "agent-skills", log=log)
-            prompt = agent.build_prompt(
+
+        def first_prompt(failure: str | None = None) -> str:
+            return agent.build_prompt(
                 build, src_path, plan.recipe_names if args.engine != "ai" else [], target_java=args.java,
-                boot=args.boot, skills=agent_skills, run_tests=run_tests, skip_tests=skip_tests,
+                boot=args.boot, skills=agent_skills, run_tests=run_tests, skip_tests=skip_tests, failure=failure,
             )
-            agent_passes.append(_agent_pass(args, src_path, prompt, agent_log, log))
+        if args.agent and args.agent_on == "always":
+            agent_passes.append(_agent_pass(args, src_path, first_prompt(), agent_log, log))
         if not args.skip_format:
             formatting.reconcile(build, log=log)
 
@@ -234,17 +245,22 @@ def cmd_migrate(args: argparse.Namespace) -> int:
                     build, build_result, model=args.ai_model, max_iterations=args.ai_max_iterations,
                     run_tests=run_tests, skip_tests=skip_tests, log=log,
                 )
-            # Each retry hands the agent javamod's own failure, not its own
-            # view of the build, and javamod re-checks -- the agent never
-            # gets to declare the build fixed.
-            for attempt in range(1, args.agent_retries + 1 if args.agent else 1):
+            # Each pass here hands the agent javamod's own failure, not its
+            # own view of the build, and javamod re-checks -- the agent never
+            # gets to declare the build fixed. With --agent-on failure the
+            # first pass happens here too, and only if the recipes fell short.
+            remaining = (args.agent_retries + (args.agent_on == "failure")) if args.agent else 0
+            for attempt in range(1, remaining + 1):
                 if build_result.ok:
                     break
-                log(f"agent: build check failed; retry {attempt}/{args.agent_retries}")
-                prompt = agent.retry_prompt(
-                    build, src_path, failure=buildcheck.condense(build.tool, build_result.output),
-                    attempt=attempt, skills=agent_skills, skip_tests=skip_tests,
-                )
+                failure = buildcheck.condense(build.tool, build_result.output)
+                if agent_passes:
+                    log(f"agent: build check failed; retry {len(agent_passes)}/{args.agent_retries}")
+                    prompt = agent.retry_prompt(build, src_path, failure=failure, attempt=len(agent_passes),
+                                                skills=agent_skills, skip_tests=skip_tests)
+                else:
+                    log("agent: build check failed after the recipes; running the agent")
+                    prompt = first_prompt(failure)
                 agent_passes.append(_agent_pass(args, src_path, prompt, agent_log, log))
                 if not args.skip_format:
                     formatting.reconcile(build, log=log)
@@ -292,7 +308,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
         if build_ok is False and args.execute and not args.force_push:
             if not args.quiet:
-                report.print_summary()
+                report.print_summary(diff_stat_lines=args.diff_stat_lines)
             if args.report:
                 report.write_json(args.report)
             raise ModError("build/tests failed after migration; not pushing (use --force-push to push anyway)")
@@ -309,7 +325,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         report.pushed = pushed
 
         if not args.quiet:
-            report.print_summary()
+            report.print_summary(diff_stat_lines=args.diff_stat_lines)
             if not pushed:
                 print(f"local checkout: {src_path}")
         if args.report:
@@ -336,6 +352,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command == "migrate" and (args.agent_skill or args.agent_retries) and not args.agent:
         print("error: --agent-skill and --agent-retries need --agent", file=sys.stderr)
+        return 2
+    if args.command == "migrate" and args.agent and args.agent_on == "failure" and args.skip_build:
+        print("error: --agent-on failure needs the build check; drop --skip-build", file=sys.stderr)
+        return 2
+    if args.command == "migrate" and args.report == "-" and args.issues == "-":
+        # Both on stdout would interleave YAML and JSON; the report already
+        # carries the same issues as its residual_issues field.
+        print("error: --report - and --issues - can't both use stdout; the report already includes the issues "
+              "as residual_issues", file=sys.stderr)
         return 2
     if args.command == "migrate" and args.agent:
         try:

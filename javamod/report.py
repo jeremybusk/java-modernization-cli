@@ -11,6 +11,14 @@ from pathlib import Path
 from typing import Any
 
 
+def _cap_diff_stat(diff_stat: str, limit: int) -> str:
+    """Keep the first *limit* file lines and git's totals line ("N files changed, ...")."""
+    *files, totals = diff_stat.splitlines()
+    if limit <= 0 or len(files) <= limit:
+        return diff_stat
+    return "\n".join(files[:limit] + [f" ... {len(files) - limit} more file(s) (full list in --report)", totals])
+
+
 @dataclasses.dataclass
 class RunReport:
     source: str
@@ -42,7 +50,8 @@ class RunReport:
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self) | {"generated_at": dt.datetime.now(dt.timezone.utc).isoformat()}
 
-    def print_summary(self) -> None:
+    def print_summary(self, diff_stat_lines: int = 0) -> None:
+        """Print the human summary; *diff_stat_lines* caps the changed-file list (0 = all)."""
         print()
         print(f"source:      {self.source}" + (f"  (ref: {self.source_ref})" if self.source_ref else ""))
         print(f"build:       {self.build_tool} @ {self.build_root}  -> Java {self.target_java}"
@@ -51,12 +60,14 @@ class RunReport:
         print(f"recipes:     {len(self.recipes)} applied" if self.recipes else "recipes:     none (ai-only engine)")
         if self.agent:
             passes = f"{self.agent_passes} passes, " if self.agent_passes > 1 else ""
-            print(f"agent:       {self.agent} ({passes}{'finished' if self.agent_ok else 'did NOT finish cleanly'})"
+            status = ("not run: build passed without it" if not self.agent_passes
+                      else f"{passes}{'finished' if self.agent_ok else 'did NOT finish cleanly'}")
+            print(f"agent:       {self.agent} ({status})"
                   + (f", skills: {', '.join(self.agent_skills)}" if self.agent_skills else "")
                   + (f"\n             transcript: {self.agent_log}" if self.agent_log else ""))
         print(f"changed:     {'yes' if self.changed else 'no'}")
         if self.diff_stat:
-            print("\n" + self.diff_stat)
+            print("\n" + _cap_diff_stat(self.diff_stat, diff_stat_lines))
         if self.build_ok is not None:
             print(f"\nbuild/test:  {'passed' if self.build_ok else 'FAILED'}")
             if self.skipped_tests:
