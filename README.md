@@ -115,8 +115,10 @@ and `ANTHROPIC_API_KEY` set.
 | `--agent-skill` | `JAVAMOD_AGENT_SKILLS` (comma-separated) | — | Agent Skill to install for `--agent`, repeatable: `modern-java`, `java-version-upgrade`, a local dir with `SKILL.md`, or `git-url#path/to/skill`. |
 | `--agent-model` | `JAVAMOD_AGENT_MODEL` | the CLI's default | Passed to the agent CLI's `--model`. |
 | `--agent-arg` | — | — | Extra argument for the agent CLI, repeatable (`--agent-arg=--flag`). |
-| `--agent-timeout` | `JAVAMOD_AGENT_TIMEOUT` | `3600` | Seconds before the agent run is stopped. |
+| `--agent-timeout` | `JAVAMOD_AGENT_TIMEOUT` | `3600` | Seconds before each agent pass is stopped. |
+| `--agent-retries` | `JAVAMOD_AGENT_RETRIES` | `0` | If javamod's build check still fails after the agent, give it up to this many more passes with that failure output. |
 | `--skip-build` / `--skip-tests` | — | off | Skip compiling, or compile without running tests. |
+| `--skip-test` | `JAVAMOD_SKIP_TESTS` (comma-separated) | — | Exclude a test class from the build check, repeatable; for tests confirmed to fail for reasons outside the migration (e.g. a live external service). Recorded in the report and commit message. |
 | `--skip-format` | — | off | Don't run the project's own formatter (spring-javaformat/Spotless) after migrating, even if detected. |
 | `--execute` | — | off (plan + local commit only) | Actually push to `--dest`. |
 | `--local-only` | — | off | Commit locally; never push, even with `--execute`. |

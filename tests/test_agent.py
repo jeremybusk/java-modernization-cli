@@ -78,37 +78,49 @@ class BuildPromptTests(unittest.TestCase):
         self.assertIn("Do NOT run git commit", prompt)
 
 
+class RetryPromptTests(unittest.TestCase):
+    def test_carries_failure_skips_and_test_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            build = BuildRoot(path=repo, tool="maven")
+            prompt = agent.retry_prompt(build, repo, failure="[ERROR]   FooTest.bar:3 boom", attempt=2,
+                                        skills=["modern-java"], skip_tests=["LiveApiTest"])
+        self.assertIn("Follow-up pass 2", prompt)
+        self.assertIn("FooTest.bar:3 boom", prompt)
+        self.assertIn("LiveApiTest", prompt)
+        self.assertIn("Never delete, disable", prompt)
+
+
 class RunTests(unittest.TestCase):
     def _run(self, tmp: Path, script: str, skills=()):
         repo = make_repo(tmp)
         bin_dir = fake_cli(tmp, script)
-        build = BuildRoot(path=repo, tool="maven", current_java=8, features=set())
         with mock.patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}):
-            result = agent.run(build, repo, [], agent_name="claude", skills=list(skills), target_java=21,
-                               boot=None, run_tests=False, model=None, extra_args=[], timeout=60,
-                               workdir=tmp, log_path=tmp / "transcript.log", log=lambda _m: None)
-        return repo, result
+            installed = agent.install(repo, "claude", list(skills), tmp / "cache", log=lambda _m: None)
+            ok = agent.run(repo, "do it", agent_name="claude", model=None, extra_args=[], timeout=60,
+                           log_path=tmp / "transcript.log", log=lambda _m: None)
+        return repo, ok, installed
 
     def test_edits_are_kept_and_skills_are_excluded_from_the_commit(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             skill = make_skill(tmp, "demo")
-            repo, result = self._run(tmp, "echo changed > Changed.java\necho done\n", skills=[str(skill)])
-            self.assertTrue(result.ok)
-            self.assertEqual(result.skills, ["demo"])
+            repo, ok, installed = self._run(tmp, "echo changed > Changed.java\necho done\n", skills=[str(skill)])
+            self.assertTrue(ok)
+            self.assertEqual(installed, ["demo"])
             self.assertTrue((repo / ".claude/skills/demo/SKILL.md").is_file())
             status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True,
                                     text=True, check=True).stdout
             self.assertIn("Changed.java", status)
             self.assertNotIn(".claude", status)
-            self.assertIn("done", result.log_path.read_text())
+            self.assertIn("done", (tmp / "transcript.log").read_text())
 
     def test_commits_made_by_the_agent_are_folded_back(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             script = ("echo x > A.java && git add A.java && "
                       "git -c user.email=a@a -c user.name=a commit -q -m agent\n")
-            repo, result = self._run(tmp, script)
+            repo, _ok, _installed = self._run(tmp, script)
             log = subprocess.run(["git", "log", "--oneline"], cwd=repo, capture_output=True, text=True,
                                  check=True).stdout
             self.assertEqual(len(log.splitlines()), 1)
@@ -116,8 +128,8 @@ class RunTests(unittest.TestCase):
 
     def test_nonzero_exit_is_reported_not_raised(self):
         with tempfile.TemporaryDirectory() as tmp:
-            _repo, result = self._run(Path(tmp), "exit 3\n")
-            self.assertFalse(result.ok)
+            _repo, ok, _installed = self._run(Path(tmp), "exit 3\n")
+            self.assertFalse(ok)
 
     def test_missing_cli_fails_fast(self):
         with mock.patch("shutil.which", return_value=None):

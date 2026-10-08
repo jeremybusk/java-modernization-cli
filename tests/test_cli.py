@@ -69,6 +69,50 @@ class AgentArgumentValidationTests(unittest.TestCase):
         clone.assert_not_called()
 
 
+def _fake_agent_edit(repo, _prompt, **_kwargs):
+    (repo / "Edited.java").write_text("class Edited {}", encoding="utf-8")
+    return True
+
+
+class AgentRetryTests(unittest.TestCase):
+    def _migrate(self, tmp: Path, results: list, retries: int, extra=()):
+        source = make_source_repo(tmp)
+        validate = mock.Mock(side_effect=[mock.Mock(ok=ok, output="[ERROR]   FooTest.bar:3 boom") for ok in results])
+        with mock.patch("javamod.openrewrite.run", return_value=True), \
+                mock.patch("javamod.agent.cli_for"), \
+                mock.patch("javamod.agent.install", return_value=[]), \
+                mock.patch("javamod.agent.run", side_effect=_fake_agent_edit) as run, \
+                mock.patch("javamod.buildcheck.validate", validate), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["migrate", "--source", str(source), "--dest-branch", "b", "--local-only",
+                             "--workdir", str(tmp / "work"), "--agent", "claude",
+                             "--agent-retries", str(retries), "--skip-format", *extra])
+        return code, run, validate
+
+    def test_retries_until_javamods_own_check_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, run, validate = self._migrate(Path(tmp), [False, False, True], retries=3)
+        self.assertEqual(code, 0)
+        self.assertEqual(run.call_count, 3)  # first pass + 2 retries; stops once the check passes
+        self.assertEqual(validate.call_count, 3)
+        self.assertIn("FooTest.bar:3 boom", run.call_args.args[1])
+
+    def test_no_retries_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, run, _validate = self._migrate(Path(tmp), [False], retries=0)
+        self.assertEqual(code, 1)
+        self.assertEqual(run.call_count, 1)
+
+    def test_skip_test_reaches_the_build_check_and_the_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _run, validate = self._migrate(Path(tmp), [True], retries=0, extra=("--skip-test", "LiveApiTest"))
+            message = subprocess.run(["git", "log", "-1", "--format=%B"], cwd=Path(tmp) / "work" / "src",
+                                     capture_output=True, text=True, check=True).stdout
+        self.assertEqual(code, 0)
+        self.assertEqual(validate.call_args.kwargs["skip_tests"], ["LiveApiTest"])
+        self.assertIn("Tests excluded from javamod's build check: LiveApiTest", message)
+
+
 class MigrateDryRunTests(unittest.TestCase):
     @mock.patch("javamod.openrewrite.run", return_value=True)
     def test_local_only_skip_build_run_succeeds_and_creates_branch(self, _mock_rewrite):

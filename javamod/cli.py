@@ -100,13 +100,21 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--agent-arg", action="append", default=[],
                           help="extra argument passed through to the agent CLI, repeatable (use --agent-arg=--flag)")
     migrate.add_argument("--agent-timeout", type=int, default=env_default("JAVAMOD_AGENT_TIMEOUT", 3600, int),
-                          help="seconds before the agent run is stopped (default: %(default)s)")
+                          help="seconds before each agent pass is stopped (default: %(default)s)")
+    migrate.add_argument("--agent-retries", type=int, default=env_default("JAVAMOD_AGENT_RETRIES", 0, int),
+                          help="if javamod's own build check still fails after the agent, give the agent up to this "
+                               "many more passes with that failure output (default: %(default)s)")
 
     migrate.add_argument("--skip-build", action="store_true", help="skip compiling/testing the result")
     migrate.add_argument("--skip-format", action="store_true",
                           help="don't run the project's own formatter (spring-javaformat/Spotless) after migrating, "
                                "even if one is detected")
     migrate.add_argument("--skip-tests", action="store_true", help="compile only; don't run the test suite")
+    migrate.add_argument("--skip-test", action="append", metavar="CLASS",
+                          default=[t for t in env_default("JAVAMOD_SKIP_TESTS", "").split(",") if t],
+                          help="exclude this test class (simple or fully qualified name) from the build check, "
+                               "repeatable; for tests known to fail for reasons outside the migration, e.g. a "
+                               "live external service. Recorded in the report and commit message.")
     migrate.add_argument("--shallow", action="store_true", help="shallow-clone a remote source (loses history)")
     migrate.add_argument("--allow-dirty", action="store_true", help="allow a local source with uncommitted changes")
 
@@ -154,6 +162,11 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _agent_pass(args: argparse.Namespace, repo: Path, prompt: str, log_path: Path, log) -> bool:
+    return agent.run(repo, prompt, agent_name=args.agent, model=args.agent_model, extra_args=args.agent_arg,
+                     timeout=args.agent_timeout, log_path=log_path, log=log)
+
+
 def cmd_migrate(args: argparse.Namespace) -> int:
     if not args.local_only and not args.dest:
         raise ModError("--dest is required unless --local-only is set")
@@ -194,47 +207,67 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             )
         if args.engine == "ai":
             ai.modernize_tree(build, target_java=args.java, model=args.ai_model, max_files=args.ai_max_files, log=log)
-        agent_result = None
+        run_tests = not args.skip_tests
+        skip_tests = args.skip_test if run_tests else []
+        agent_skills: list[str] = []
+        agent_passes: list[bool] = []
+        agent_log = None
         if args.agent:
-            agent_result = agent.run(
-                build, src_path, plan.recipe_names if args.engine != "ai" else [], agent_name=args.agent,
-                skills=args.agent_skill, target_java=args.java, boot=args.boot, run_tests=not args.skip_tests,
-                model=args.agent_model, extra_args=args.agent_arg, timeout=args.agent_timeout,
-                workdir=workdir, log=log,
-                # Outlives a temp workdir that's deleted on success: the
-                # transcript is what you review an agent run by.
-                log_path=workdir / "agent-transcript.log" if persistent or args.keep
-                else Path(tempfile.mkstemp(prefix="javamod-agent-", suffix=".log")[1]),
+            # Outlives a temp workdir that's deleted on success: the
+            # transcript is what you review an agent run by.
+            agent_log = (workdir / "agent-transcript.log" if persistent or args.keep
+                         else Path(tempfile.mkstemp(prefix="javamod-agent-", suffix=".log")[1]))
+            agent_skills = agent.install(src_path, args.agent, args.agent_skill, workdir / "agent-skills", log=log)
+            prompt = agent.build_prompt(
+                build, src_path, plan.recipe_names if args.engine != "ai" else [], target_java=args.java,
+                boot=args.boot, skills=agent_skills, run_tests=run_tests, skip_tests=skip_tests,
             )
+            agent_passes.append(_agent_pass(args, src_path, prompt, agent_log, log))
         if not args.skip_format:
             formatting.reconcile(build, log=log)
 
         build_result = None
         if not args.skip_build:
-            build_result = buildcheck.validate(build, run_tests=not args.skip_tests)
+            build_result = buildcheck.validate(build, run_tests=run_tests, skip_tests=skip_tests)
             if not build_result.ok and args.engine == "hybrid":
                 build_result = ai.fix_build(
                     build, build_result, model=args.ai_model, max_iterations=args.ai_max_iterations,
-                    run_tests=not args.skip_tests, log=log,
+                    run_tests=run_tests, skip_tests=skip_tests, log=log,
                 )
+            # Each retry hands the agent javamod's own failure, not its own
+            # view of the build, and javamod re-checks -- the agent never
+            # gets to declare the build fixed.
+            for attempt in range(1, args.agent_retries + 1 if args.agent else 1):
+                if build_result.ok:
+                    break
+                log(f"agent: build check failed; retry {attempt}/{args.agent_retries}")
+                prompt = agent.retry_prompt(
+                    build, src_path, failure=buildcheck.condense(build.tool, build_result.output),
+                    attempt=attempt, skills=agent_skills, skip_tests=skip_tests,
+                )
+                agent_passes.append(_agent_pass(args, src_path, prompt, agent_log, log))
+                if not args.skip_format:
+                    formatting.reconcile(build, log=log)
+                build_result = buildcheck.validate(build, run_tests=run_tests, skip_tests=skip_tests)
 
         message = f"javamod: modernize to Java {args.java}" + (f", Spring Boot {args.boot}" if args.boot else "")
+        if skip_tests:
+            message += "\n\nTests excluded from javamod's build check: " + ", ".join(skip_tests)
         commit = gitrepo.commit_all(src_path, message)
         changed = commit is not None
         diff_stat = gitrepo.diff_stat_since(src_path, base_rev) if changed else ""
         build_ok = build_result.ok if build_result else None
         residual_issues: list[dict] = []
+        build_log = None
         if build_ok is False:
             residual_issues = triage.parse_build_failures(build.tool, build_result.output)
-            if not args.quiet:
-                if residual_issues:
-                    triage.print_summary(residual_issues)
-                else:
-                    # No known pattern matched -- still show *something* rather
-                    # than nothing, especially since --execute raises right after
-                    # this and never reaches the full report/build-output print.
-                    print("\nbuild/test FAILED; no known issue pattern matched this failure. Last output:")
-                    print(build_result.output[-3000:])
+            # The full log goes to a file; the summary below shows only the
+            # condensed failure (both report paths print it, so a failure is
+            # never silent even when --execute blocks the push).
+            build_log = workdir / "build-output.log"
+            build_log.write_text(build_result.output, encoding="utf-8")
+            if not args.quiet and residual_issues:
+                triage.print_summary(residual_issues)
             issues_destination = args.issues or str(workdir / "remaining-issues.yaml")
             triage.write(residual_issues, issues_destination)
             if not args.quiet and issues_destination != "-":
@@ -248,11 +281,13 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             build_root=str(build.path.relative_to(src_path)), target_java=args.java,
             boot_target=args.boot, profile=args.profile, engine=args.engine, recipes=plan.recipe_names,
             changed=changed, diff_stat=diff_stat, build_ok=build_ok,
-            build_output_tail=build_result.output if build_result else "", commit=commit, branch=branch,
+            build_output_tail=buildcheck.condense(build.tool, build_result.output) if build_ok is False else "",
+            commit=commit, branch=branch,
             destination=args.dest, pushed=False, residual_issues=residual_issues,
-            agent=args.agent, agent_ok=agent_result.ok if agent_result else None,
-            agent_skills=agent_result.skills if agent_result else [],
-            agent_log=str(agent_result.log_path) if agent_result else None,
+            build_log=str(build_log) if build_log else None, skipped_tests=skip_tests,
+            agent=args.agent, agent_ok=all(agent_passes) if agent_passes else None,
+            agent_passes=len(agent_passes), agent_skills=agent_skills,
+            agent_log=str(agent_log) if agent_log else None,
         )
 
         if build_ok is False and args.execute and not args.force_push:
@@ -299,8 +334,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "migrate" and args.recipe_source == "codegenome" and not args.allow_codegenome:
         print("error: --recipe-source codegenome also requires --allow-codegenome", file=sys.stderr)
         return 2
-    if args.command == "migrate" and args.agent_skill and not args.agent:
-        print("error: --agent-skill needs --agent", file=sys.stderr)
+    if args.command == "migrate" and (args.agent_skill or args.agent_retries) and not args.agent:
+        print("error: --agent-skill and --agent-retries need --agent", file=sys.stderr)
         return 2
     if args.command == "migrate" and args.agent:
         try:

@@ -53,7 +53,7 @@ def _ask_for_files(client, model: str, system: str, user: str) -> dict[str, str]
 
 
 def fix_build(build: BuildRoot, result: buildcheck.BuildResult, *, model: str, max_iterations: int,
-              run_tests: bool, log=print) -> buildcheck.BuildResult:
+              run_tests: bool, skip_tests: list[str] = (), log=print) -> buildcheck.BuildResult:
     """Iteratively ask the model to fix a failing build, rebuilding each time."""
     client = _client()
     for attempt in range(1, max_iterations + 1):
@@ -85,7 +85,7 @@ def fix_build(build: BuildRoot, result: buildcheck.BuildResult, *, model: str, m
             return result
         for rel, content in fixes.items():
             (build.path / rel).write_text(content, encoding="utf-8")
-        result = buildcheck.validate(build, run_tests=run_tests)
+        result = buildcheck.validate(build, run_tests=run_tests, skip_tests=skip_tests)
         if result.ok:
             return result
     return result

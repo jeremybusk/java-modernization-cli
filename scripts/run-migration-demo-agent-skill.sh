@@ -7,4 +7,5 @@ javamod migrate \
   --dest-branch modernize-java21-ai \
   --issues - \
   --report - \
+  --agent-retries 1 \
   --java 21 --boot 3.5 --profile aggressive --execute

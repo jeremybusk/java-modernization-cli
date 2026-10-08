@@ -82,6 +82,21 @@ _MAVEN_CONTINUATION_RE = re.compile(r"^\[ERROR\]\s{2,}(?P<text>.*)$")
 _GRADLE_ERROR_RE = re.compile(r"^(?P<file>\S+\.java):(?P<line>\d+):\s*error:\s*(?P<message>.*)$")
 _GRADLE_CONTINUATION_RE = re.compile(r"^\s{2,}(?P<text>\S.*)$")
 _TEST_FAILURE_RE = re.compile(r"^\s{2}(?P<test>\S+\.\S+)\s+\u00bb\s+(?P<detail>.+)$")
+# Surefire 3's end-of-module summary (one entry per failing test method):
+#   [ERROR] Failures:
+#   [ERROR]   ExchangeRatesClientTest.shouldRetrieveExchangeRates:26 expected: <null> but was: <USD>
+#   [ERROR] Errors:
+#   [ERROR]   FooTest.bar:12->helper:30 » IllegalState Failed to load ApplicationContext
+# Rerun entries ("Run 1: ...") under a flaky test are skipped.
+_SUREFIRE_BLOCK_RE = re.compile(r"^\[ERROR\] (Failures|Errors|Flakes):\s*$")
+_SUREFIRE_ENTRY_RE = re.compile(
+    r"^\[ERROR\]\s{2,}(?!Run \d+:)(?P<test>[^\s:\u00bb]+)(?::(?P<line>\d+))?(?:->\S*)?(?:\s+\u00bb)?(?:\s+(?P<detail>.*))?$"
+)
+# Gradle's per-test failure line, with the exception on the indented line after:
+#   demo.BadTest > bad FAILED
+#       java.lang.AssertionError at BadTest.java:12
+_GRADLE_TEST_RE = re.compile(r"^(?P<cls>[\w.$]+) > (?P<method>.+) FAILED$")
+_GRADLE_TEST_DETAIL_RE = re.compile(r"^\s+(?P<detail>\S.*?)(?: at \S+\.java:(?P<line>\d+))?$")
 # Maven's "POM could not be read" failure (a reactor-level validation error, not
 # a javac error) looks like:
 #   [ERROR]   The project group:artifact:version (/path/to/pom.xml) has 1 error
@@ -129,6 +144,37 @@ def _parse_test_failures(output: str) -> list[tuple[str, None, str]]:
                 found.append((match["test"], None, match["detail"]))
             elif raw_line.strip() == "" or raw_line.startswith("Tests run:"):
                 in_block = False
+    return found
+
+
+def _parse_surefire_summary(output: str) -> list[tuple[str, int | None, str]]:
+    found = []
+    in_block = False
+    for raw_line in output.splitlines():
+        if _SUREFIRE_BLOCK_RE.match(raw_line):
+            in_block = True
+            continue
+        if in_block:
+            match = _SUREFIRE_ENTRY_RE.match(raw_line)
+            if match:
+                found.append((match["test"], int(match["line"]) if match["line"] else None,
+                              (match["detail"] or "test failed").strip()))
+            elif not raw_line.startswith("[ERROR]   "):
+                in_block = False
+    return found
+
+
+def _parse_gradle_test_failures(output: str) -> list[tuple[str, int | None, str]]:
+    found = []
+    lines = output.splitlines()
+    for index, raw_line in enumerate(lines):
+        match = _GRADLE_TEST_RE.match(raw_line)
+        if not match:
+            continue
+        test = f"{match['cls']}.{match['method'].removesuffix('()')}"
+        detail = _GRADLE_TEST_DETAIL_RE.match(lines[index + 1]) if index + 1 < len(lines) else None
+        found.append((test, int(detail["line"]) if detail and detail["line"] else None,
+                      detail["detail"] if detail else "test failed"))
     return found
 
 
@@ -185,10 +231,13 @@ def parse_build_failures(build_tool: str, output: str) -> list[dict[str, Any]]:
     if build_tool == "maven":
         raw = _parse_compile_errors(output, _MAVEN_ERROR_RE, _MAVEN_CONTINUATION_RE)
         raw += _parse_maven_pom_validation_errors(output)
+        tests = _parse_surefire_summary(output)
     else:
         raw = _parse_compile_errors(output, _GRADLE_ERROR_RE, _GRADLE_CONTINUATION_RE)
-    raw += _parse_test_failures(output)
-    raw = _dedupe_by_location(raw)
+        tests = _parse_gradle_test_failures(output)
+    tests += _parse_test_failures(output)
+    test_names = {test for test, _line, _message in tests}
+    raw = _dedupe_by_location(raw + tests)
 
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
     order: list[tuple[str, str]] = []
@@ -199,7 +248,7 @@ def parse_build_failures(build_tool: str, output: str) -> list[dict[str, Any]]:
             grouped[key] = {
                 "file": file,
                 "lines": [],
-                "category": pattern["category"] if pattern else "unknown",
+                "category": pattern["category"] if pattern else ("test-failure" if file in test_names else "unknown"),
                 "message": message.strip(),
                 "likely_cause": pattern["likely_cause"] if pattern else None,
                 "recommended_fix": pattern["recommended_fix"] if pattern else None,

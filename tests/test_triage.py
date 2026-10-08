@@ -52,6 +52,60 @@ MAVEN_POM_VALIDATION_OUTPUT = """[ERROR] [ERROR] Some problems were encountered 
 """
 
 
+# Real Surefire 3 output from a piggymetrics migration run (trimmed), plus an
+# Errors block in the shape Surefire prints for exceptions and flaky reruns.
+SUREFIRE_SUMMARY_OUTPUT = """[INFO] Results:
+[INFO]
+[ERROR] Failures:
+[ERROR]   ExchangeRatesClientTest.shouldRetrieveExchangeRates:26 expected: <null> but was: <USD>
+[ERROR]   ExchangeRatesClientTest.shouldRetrieveExchangeRatesForSpecifiedCurrency:41 expected: <null> but was: <USD>
+[ERROR] Errors:
+[ERROR]   AppTest.contextLoads \u00bb IllegalState Failed to load ApplicationContext
+[ERROR]   FlakyTest.sometimes
+[ERROR]   Run 1: FlakyTest.sometimes:10 expected: <1> but was: <2>
+[ERROR]   Run 2: FlakyTest.sometimes:10 expected: <1> but was: <2>
+[INFO]
+[ERROR] Tests run: 16, Failures: 2, Errors: 2, Skipped: 0
+[INFO] BUILD FAILURE
+"""
+
+# Real Gradle 4.4 output (from verifying javamod's --skip-test exclusion).
+GRADLE_TEST_OUTPUT = """demo.BadTest$Inner > bad2 FAILED
+    java.lang.AssertionError at BadTest.java:2
+
+demo.BadTest > bad FAILED
+    java.lang.AssertionError at BadTest.java:1
+
+2 tests completed, 2 failed
+:test FAILED
+"""
+
+
+class TestSummaryParsingTests(unittest.TestCase):
+    def test_surefire_summary_entries_become_test_failure_issues(self):
+        issues = triage.parse_build_failures("maven", SUREFIRE_SUMMARY_OUTPUT)
+        self.assertEqual([i["file"] for i in issues], [
+            "ExchangeRatesClientTest.shouldRetrieveExchangeRates",
+            "ExchangeRatesClientTest.shouldRetrieveExchangeRatesForSpecifiedCurrency",
+            "AppTest.contextLoads",
+            "FlakyTest.sometimes",
+        ])
+        first = issues[0]
+        self.assertEqual(first["category"], "test-failure")
+        self.assertEqual(first["lines"], [26])
+        self.assertEqual(first["message"], "expected: <null> but was: <USD>")
+        self.assertIsNone(first["recommended_fix"])
+        self.assertIn("IllegalState", issues[2]["message"])
+
+    def test_gradle_test_failures_are_parsed(self):
+        issues = triage.parse_build_failures("gradle", GRADLE_TEST_OUTPUT)
+        self.assertEqual([(i["file"], i["lines"], i["category"]) for i in issues], [
+            ("demo.BadTest$Inner.bad2", [2], "test-failure"),
+            ("demo.BadTest.bad", [1], "test-failure"),
+        ])
+        self.assertEqual(issues[0]["message"], "java.lang.AssertionError")
+
+
 class MavenParsingTests(unittest.TestCase):
     def test_known_patterns_are_matched_with_fix_text(self):
         issues = triage.parse_build_failures("maven", MAVEN_OUTPUT)
@@ -114,7 +168,7 @@ class TestFailureParsingTests(unittest.TestCase):
     def test_test_failures_are_captured(self):
         issues = triage.parse_build_failures("maven", TEST_FAILURE_OUTPUT)
         self.assertEqual(len(issues), 2)
-        self.assertTrue(all(i["category"] == "unknown" for i in issues))
+        self.assertTrue(all(i["category"] == "test-failure" for i in issues))
         self.assertIn("HotelControllerTest.shouldCreateAndUpdateAndDelete", issues[0]["file"])
 
 

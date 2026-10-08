@@ -54,9 +54,9 @@ issues:
 
 | Field | Meaning |
 | --- | --- |
-| `file` | The source file the compiler/test runner pointed at. |
+| `file` | The source file the compiler pointed at, or `TestClass.method` for a failing test. |
 | `lines` | Every line number reported for this issue, deduplicated. |
-| `category` | `unresolved-dependency`, `removed-api`, `renamed-api`, `changed-signature`, or `unknown`. |
+| `category` | `unresolved-dependency`, `removed-api`, `renamed-api`, `changed-signature`, `missing-dependency-version`, `test-failure` (a failing test with no matched pattern), or `unknown`. |
 | `message` | The compiler's own message (or test failure detail), as reported. |
 | `likely_cause` / `recommended_fix` | Set only when a known pattern matched; `null` otherwise. Never fabricated. |
 | `confidence` | `high` for a matched, verified pattern; `unverified` otherwise. |
@@ -69,6 +69,16 @@ reported as five unrelated entries. Maven also prints every compile error
 twice -- once inline, once again in its goal-failure summary -- which is
 deduplicated by (file, line) before grouping, keeping whichever copy carried
 more context.
+
+Failing tests are parsed from Surefire 3's end-of-module summary
+(`[ERROR] Failures:` / `[ERROR] Errors:` blocks; flaky-test `Run N:` lines
+are skipped), from the older Surefire `Tests in error:` block, and from
+Gradle's `Class > method FAILED` lines. Each failing test method is its own
+issue, with the line the runner reported. triage can't tell from the output
+alone *why* a test fails -- a live external service, for example, looks like
+any other assertion failure -- so these get no fix text. If you've confirmed
+a test fails for reasons outside the migration, exclude it with
+`--skip-test` (see [agent-stage-and-skills.md](agent-stage-and-skills.md#known-failing-tests---skip-test)).
 
 ## The known-pattern table
 

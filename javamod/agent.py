@@ -73,13 +73,6 @@ BUILTIN_SKILLS = {
 NAME_RE = re.compile(r"^name:\s*['\"]?([\w.-]+)", re.MULTILINE)
 
 
-@dataclasses.dataclass
-class AgentResult:
-    ok: bool
-    skills: list[str]
-    log_path: Path
-
-
 def cli_for(name: str) -> AgentCli:
     agent = AGENTS[name]
     if shutil.which(agent.binary) is None:
@@ -139,8 +132,29 @@ def install_skills(repo: Path, agent: AgentCli, specs: list[str], cache: Path) -
     return names
 
 
+TEST_RULES = (
+    "Never delete, disable (@Disabled, @Ignore, assumptions, build-tool skips), or weaken a test or its "
+    "assertions, and never change an expected value to match new behavior unless the upgrade itself "
+    "legitimately changed that behavior. If a failure comes from outside the code -- a live external "
+    "service, network access, missing credentials, the local environment -- make no change for it and "
+    "say so, with your evidence, in your final reply."
+)
+RULES = (
+    "Rules: edit files only. Do NOT run git commit, git push, or change branches -- the calling tool "
+    "commits and validates the result itself. Don't create notes, plans, or summary files in the repo; "
+    "put your summary in your final reply. " + TEST_RULES
+)
+
+
+def _skipped_note(skip_tests: list[str]) -> list[str]:
+    if not skip_tests:
+        return []
+    return [f"These test classes are excluded from validation by the user as known failures unrelated to the "
+            f"upgrade; leave them and their failures alone: {', '.join(skip_tests)}."]
+
+
 def build_prompt(build: BuildRoot, repo: Path, applied_recipes: list[str], *, target_java: int, boot: str | None,
-                 skills: list[str], run_tests: bool) -> str:
+                 skills: list[str], run_tests: bool, skip_tests: list[str] = ()) -> str:
     root = build.path.relative_to(repo).as_posix()
     goal = "test" if run_tests else ("test-compile" if build.tool == "maven" else "testClasses")
     recipes = "\n".join(f"  - {name}" for name in applied_recipes) or "  (none)"
@@ -149,6 +163,8 @@ def build_prompt(build: BuildRoot, repo: Path, applied_recipes: list[str], *, ta
         + (f" and Spring Boot {boot}" if boot else "") + ".",
         f"It is a {build.tool} build rooted at '{root}' (detected current Java: {build.current_java or 'unknown'}).",
         f"These OpenRewrite recipes have already been applied:\n{recipes}",
+        *(["Use these installed skills where they apply: " + ", ".join(skills) + "."] if skills else []),
+        *_skipped_note(list(skip_tests)),
         "",
         "Finish the job:",
         f"1. Run the build ({build.tool} {goal}) and fix whatever fails, preserving behavior and public API.",
@@ -156,34 +172,52 @@ def build_prompt(build: BuildRoot, repo: Path, applied_recipes: list[str], *, ta
         "deprecated-for-removal APIs, build-plugin versions too old for the target JDK, and similar.",
         "3. Keep changes focused on the upgrade; don't reformat untouched code or restructure the project.",
         "",
-        "Rules: edit files only. Do NOT run git commit, git push, or change branches -- the calling tool "
-        "commits and validates the result itself. Don't create notes, plans, or summary files in the repo; "
-        "put your summary in your final reply.",
+        RULES,
     ]
-    if skills:
-        lines.insert(4, "Use these installed skills where they apply: " + ", ".join(skills) + ".")
     return "\n".join(lines)
 
 
-def run(build: BuildRoot, repo: Path, applied_recipes: list[str], *, agent_name: str, skills: list[str],
-        target_java: int, boot: str | None, run_tests: bool, model: str | None, extra_args: list[str],
-        timeout: int, workdir: Path, log_path: Path, log=print) -> AgentResult:
-    agent = cli_for(agent_name)
-    installed = install_skills(repo, agent, skills, workdir / "agent-skills")
+def retry_prompt(build: BuildRoot, repo: Path, *, failure: str, attempt: int, skills: list[str],
+                 skip_tests: list[str] = ()) -> str:
+    root = build.path.relative_to(repo).as_posix()
+    return "\n".join([
+        f"Follow-up pass {attempt}. You (or a previous pass) already worked on upgrading this {build.tool} build "
+        f"rooted at '{root}'. The calling tool then ran its own build check, which still fails. The relevant "
+        f"part of its output:",
+        "",
+        failure,
+        "",
+        *(["Use these installed skills where they apply: " + ", ".join(skills) + "."] if skills else []),
+        *_skipped_note(list(skip_tests)),
+        "Find the root cause of each failure above and fix it, preserving behavior and public API. "
+        "Rerun the build to confirm.",
+        "",
+        RULES,
+    ])
+
+
+def install(repo: Path, agent_name: str, specs: list[str], cache: Path, log=print) -> list[str]:
+    installed = install_skills(repo, cli_for(agent_name), specs, cache)
     if installed:
-        log(f"agent: installed skill(s) {', '.join(installed)} into {agent.skills_dir}/")
-    prompt = build_prompt(build, repo, applied_recipes, target_java=target_java, boot=boot, skills=installed,
-                          run_tests=run_tests)
+        log(f"agent: installed skill(s) {', '.join(installed)} into {AGENTS[agent_name].skills_dir}/")
+    return installed
+
+
+def run(repo: Path, prompt: str, *, agent_name: str, model: str | None, extra_args: list[str], timeout: int,
+        log_path: Path, log=print) -> bool:
+    """Run one agent pass on *repo*; True if the CLI exited cleanly. Appends to the transcript."""
+    agent = cli_for(agent_name)
     cmd = [agent.binary, *agent.args, *(["--model", model] if model else []), *extra_args]
     cmd += [agent.prompt_flag, prompt] if agent.prompt_flag else [prompt]
     log(f"agent: running {agent_name} (transcript: {log_path})")
     head = gitrepo.capture(["git", "rev-parse", "HEAD"], repo)
     try:
-        with log_path.open("w", encoding="utf-8") as stream:
-            stream.write("$ " + shlex.join(cmd[:-1] + ["<prompt>"]) + "\n\n" + prompt + "\n\n---\n")
+        with log_path.open("a", encoding="utf-8") as stream:
+            stream.write("=== $ " + shlex.join(cmd[:-1] + ["<prompt>"]) + "\n\n" + prompt + "\n\n---\n")
             stream.flush()
             completed = subprocess.run(cmd, cwd=repo, stdin=subprocess.DEVNULL, stdout=stream,
                                        stderr=subprocess.STDOUT, text=True, timeout=timeout, check=False)
+            stream.write("\n")
         ok = completed.returncode == 0
     except subprocess.TimeoutExpired:
         log(f"agent: timed out after {timeout}s; keeping whatever it changed")
@@ -195,4 +229,4 @@ def run(build: BuildRoot, repo: Path, applied_recipes: list[str], *, agent_name:
         gitrepo.run(["git", "reset", "-q", "--soft", head], cwd=repo)
     if not ok:
         log(f"agent: {agent_name} did not finish cleanly; see {log_path}")
-    return AgentResult(ok=ok, skills=installed, log_path=log_path)
+    return ok

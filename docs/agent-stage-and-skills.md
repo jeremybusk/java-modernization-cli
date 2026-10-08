@@ -18,6 +18,8 @@ clone source@ref
   -> coding agent + skills        (--agent, optional)        <- this stage
   -> project's own formatter      (spring-javaformat/Spotless, if declared)
   -> javamod build check          (compile, and tests unless --skip-tests)
+       \-- still failing? -> agent again with that failure, re-format, re-check
+                               (up to --agent-retries times, default 0)
   -> commit -> push               (push only with --execute and a passing build)
 ```
 
@@ -61,16 +63,65 @@ Guardrails common to all of them:
 
 * The CLI must be on `PATH`; javamod checks before cloning, not after the
   recipes have run.
+* The prompt tells the agent never to delete, disable or weaken a test or
+  its assertions, and to report failures caused by something outside the
+  code (live services, network, credentials) instead of working around them.
 * The prompt tells the agent not to commit, push, or switch branches. If it
   commits anyway, javamod soft-resets those commits so the changes are kept
   but folded into javamod's single commit.
 * Installed skills go into the clone's `.git/info/exclude`, never into the
   project's `.gitignore`, and never into the commit.
-* The transcript (command, prompt, full agent output) is saved and its path
-  is shown in the summary and in the JSON report's `agent_log` field.
+* The transcript (command, prompt, full agent output, every pass appended
+  in order) is saved and its path is shown in the summary and in the JSON
+  report's `agent_log` field.
 * A non-zero exit or a timeout (`--agent-timeout`, default 3600 s) is
   reported, not fatal; whatever the agent changed still goes through the
   build check.
+
+## Retries: `--agent-retries N`
+
+The agent already loops on its own: it runs the build, fixes, and reruns.
+`--agent-retries` adds a bounded loop around that, driven by javamod's
+own check instead of the agent's view of it. If javamod's build check still
+fails after the agent's pass, javamod sends the agent a follow-up prompt
+containing the condensed failure (the `[ERROR]` lines and Reactor Summary,
+or Gradle's failed tasks/tests), re-runs the project's formatter, and checks
+again. It stops at the first passing check or after `N` extra passes.
+
+The default is `0`, because a retry only helps when the agent missed
+something, such as a failure introduced by the formatter after it finished,
+or one it gave up on early. When the remaining failure is outside the code,
+another pass just costs time and money. And under pressure to get a passing
+build, the easiest move for an agent is to weaken the test, which the prompt
+forbids. Each pass is recorded: the report's `agent_passes` field, and
+`agent_ok` is true only if every pass exited cleanly.
+
+## Known-failing tests: `--skip-test`
+
+Some tests fail for reasons that have nothing to do with the migration. In
+piggymetrics, `ExchangeRatesClientTest` calls the live
+`https://api.exchangeratesapi.io/latest`, which now requires an access key,
+so it fails on the original code too. When you've confirmed that, exclude
+the class from javamod's build check rather than letting the agent edit it:
+
+```bash
+javamod migrate ... --agent claude --skip-test ExchangeRatesClientTest
+# or fully qualified: --skip-test com.piggymetrics.statistics.client.ExchangeRatesClientTest
+```
+
+Also settable as `JAVAMOD_SKIP_TESTS` (comma-separated). The decision is
+yours, not the agent's. The exclusion is:
+
+* applied without touching the project. Maven gets a temporary
+  `-Dsurefire.excludesFile`, which adds to the POM's own `<excludes>`
+  (`-Dtest=!X` would replace the POM's includes and excludes, quietly
+  running tests the project leaves out on purpose). Gradle gets a temporary
+  `--init-script` adding `Test.exclude` patterns, nested classes included;
+  this works on every Gradle version, unlike `excludeTestsMatching` (5.0+).
+  Both were verified against real builds.
+* passed to the agent, with an instruction to leave those tests alone;
+* recorded in the report (`skipped_tests`), the summary, and the commit
+  message, so whoever reviews the branch sees what wasn't checked.
 
 ## Built-in skills
 

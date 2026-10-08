@@ -31,8 +31,11 @@ class RunReport:
     destination: str | None
     pushed: bool
     residual_issues: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    build_log: str | None = None
+    skipped_tests: list[str] = dataclasses.field(default_factory=list)
     agent: str | None = None
     agent_ok: bool | None = None
+    agent_passes: int = 0
     agent_skills: list[str] = dataclasses.field(default_factory=list)
     agent_log: str | None = None
 
@@ -47,7 +50,8 @@ class RunReport:
         print(f"profile:     {self.profile}   engine: {self.engine}")
         print(f"recipes:     {len(self.recipes)} applied" if self.recipes else "recipes:     none (ai-only engine)")
         if self.agent:
-            print(f"agent:       {self.agent} ({'finished' if self.agent_ok else 'did NOT finish cleanly'})"
+            passes = f"{self.agent_passes} passes, " if self.agent_passes > 1 else ""
+            print(f"agent:       {self.agent} ({passes}{'finished' if self.agent_ok else 'did NOT finish cleanly'})"
                   + (f", skills: {', '.join(self.agent_skills)}" if self.agent_skills else "")
                   + (f"\n             transcript: {self.agent_log}" if self.agent_log else ""))
         print(f"changed:     {'yes' if self.changed else 'no'}")
@@ -55,8 +59,12 @@ class RunReport:
             print("\n" + self.diff_stat)
         if self.build_ok is not None:
             print(f"\nbuild/test:  {'passed' if self.build_ok else 'FAILED'}")
+            if self.skipped_tests:
+                print(f"             excluding test(s): {', '.join(self.skipped_tests)}")
             if not self.build_ok:
-                print(self.build_output_tail[-2000:])
+                print(self.build_output_tail)
+                if self.build_log:
+                    print(f"\nfull build log: {self.build_log}")
                 if self.residual_issues:
                     print(f"\n({len(self.residual_issues)} residual issue(s) triaged above)")
         if self.commit:
