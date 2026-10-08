@@ -8,4 +8,5 @@ javamod migrate \
   --issues - \
   --report - \
   --agent-retries 1 \
+  --skip-test \
   --java 21 --boot 3.5 --profile aggressive --execute
