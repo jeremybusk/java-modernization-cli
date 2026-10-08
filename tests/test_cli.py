@@ -1,3 +1,5 @@
+import contextlib
+import io
 import subprocess
 import tempfile
 import unittest
@@ -80,6 +82,54 @@ class MigrateDryRunTests(unittest.TestCase):
                 "--execute", "--yes", "--java", "21",
             ])
             self.assertEqual(code, 0)
+
+
+class BuildFailureDiagnosticsTests(unittest.TestCase):
+    """Regression coverage for a real failure: a build failure whose shape
+    triage doesn't recognize must still print *something* -- especially
+    since --execute raises right after this and never reaches the full
+    report/raw build output otherwise.
+    """
+
+    @mock.patch("javamod.openrewrite.run", return_value=True)
+    def test_unmatched_failure_still_prints_raw_output_with_execute(self, _mock_rewrite):
+        unrecognized_output = "[ERROR] something went wrong in a shape triage has never seen"
+        with tempfile.TemporaryDirectory() as tmp:
+            source = make_source_repo(Path(tmp))
+            dest = Path(tmp) / "dest.git"
+            from javamod import gitrepo
+            gitrepo.init_bare_destination(dest)
+            buffer = io.StringIO()
+            with mock.patch("javamod.buildcheck.validate",
+                             return_value=mock.Mock(ok=False, output=unrecognized_output)), \
+                 contextlib.redirect_stdout(buffer):
+                code = cli.main([
+                    "migrate", "--source", str(source), "--dest", str(dest), "--dest-branch", "modernize-java21",
+                    "--execute", "--yes", "--java", "21",
+                ])
+            self.assertEqual(code, 2)
+            self.assertIn(unrecognized_output, buffer.getvalue())
+
+    @mock.patch("javamod.buildcheck.validate")
+    @mock.patch("javamod.openrewrite.run", return_value=True)
+    def test_matched_failure_writes_issues_file_even_with_execute(self, _mock_rewrite, mock_validate):
+        mock_validate.return_value = mock.Mock(
+            ok=False, output="[ERROR] /app/Service.java:[1,1] cannot find symbol\n"
+                             "[ERROR]   symbol:   method findOne(long)\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            source = make_source_repo(Path(tmp))
+            dest = Path(tmp) / "dest.git"
+            from javamod import gitrepo
+            gitrepo.init_bare_destination(dest)
+            workdir = Path(tmp) / "work"
+            code = cli.main([
+                "migrate", "--source", str(source), "--dest", str(dest), "--dest-branch", "modernize-java21",
+                "--execute", "--yes", "--java", "21", "--workdir", str(workdir),
+            ])
+            self.assertEqual(code, 2)
+            issues_file = workdir / "remaining-issues.yaml"
+            self.assertTrue(issues_file.is_file())
+            self.assertIn("renamed-api", issues_file.read_text(encoding="utf-8"))
 
 
 class BootCrossMajorJumpCliTests(unittest.TestCase):

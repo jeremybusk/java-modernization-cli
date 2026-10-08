@@ -62,6 +62,19 @@ KNOWN_PATTERNS: list[dict[str, Any]] = [
                             "(add a Sort argument if one was previously implied).",
         "confidence": "high",
     },
+    {
+        "name": "boot-recipe-stripped-unmanaged-dependency-version",
+        "signatures": ("dependencies.dependency.version",),
+        "category": "missing-dependency-version",
+        "likely_cause": "An OpenRewrite Spring Boot upgrade recipe removed this dependency's explicit "
+                         "<version>, assuming Spring Boot's own dependency-management BOM would supply "
+                         "one -- but it doesn't for this dependency (verified: it's absent from the "
+                         "published spring-boot-dependencies POM for the target version).",
+        "recommended_fix": "Add back an explicit <version> for this dependency (check `git diff` on the "
+                            "affected pom.xml for the version the recipe removed), or add a "
+                            "<dependencyManagement> entry that pins one.",
+        "confidence": "high",
+    },
 ]
 
 _MAVEN_ERROR_RE = re.compile(r"^\[ERROR\]\s+(?P<file>\S+\.java):\[(?P<line>\d+),\d+\]\s+(?P<message>.*)$")
@@ -69,6 +82,14 @@ _MAVEN_CONTINUATION_RE = re.compile(r"^\[ERROR\]\s{2,}(?P<text>.*)$")
 _GRADLE_ERROR_RE = re.compile(r"^(?P<file>\S+\.java):(?P<line>\d+):\s*error:\s*(?P<message>.*)$")
 _GRADLE_CONTINUATION_RE = re.compile(r"^\s{2,}(?P<text>\S.*)$")
 _TEST_FAILURE_RE = re.compile(r"^\s{2}(?P<test>\S+\.\S+)\s+\u00bb\s+(?P<detail>.+)$")
+# Maven's "POM could not be read" failure (a reactor-level validation error, not
+# a javac error) looks like:
+#   [ERROR]   The project group:artifact:version (/path/to/pom.xml) has 1 error
+#   [ERROR]     'dependencies.dependency.version' for group:artifact:jar is missing. @ line 58, column 15
+_MAVEN_POM_PROJECT_RE = re.compile(r"^\[ERROR\]\s+The project \S+:\S+:\S+ \((?P<file>\S+\.xml)\) has \d+ error")
+_MAVEN_POM_DETAIL_RE = re.compile(
+    r"^\[ERROR\]\s+'(?P<field>[\w.]+)' for (?P<coord>[\w.\-]+:[\w.\-]+)(?::\w+)? is missing\.\s*@ line (?P<line>\d+)"
+)
 
 
 def _parse_compile_errors(output: str, error_re: re.Pattern, continuation_re: re.Pattern) -> list[tuple[str, int, str]]:
@@ -111,6 +132,24 @@ def _parse_test_failures(output: str) -> list[tuple[str, None, str]]:
     return found
 
 
+def _parse_maven_pom_validation_errors(output: str) -> list[tuple[str, int, str]]:
+    found: list[tuple[str, int, str]] = []
+    current_file: str | None = None
+    for raw_line in output.splitlines():
+        project_match = _MAVEN_POM_PROJECT_RE.match(raw_line)
+        if project_match:
+            current_file = project_match["file"]
+            continue
+        if current_file is not None:
+            detail_match = _MAVEN_POM_DETAIL_RE.match(raw_line)
+            if detail_match:
+                found.append((current_file, int(detail_match["line"]),
+                              f"'{detail_match['field']}' for {detail_match['coord']} is missing"))
+            elif raw_line.strip() in ("", "[ERROR]"):
+                current_file = None
+    return found
+
+
 def _dedupe_by_location(raw: list[tuple[str, int | None, str]]) -> list[tuple[str, int | None, str]]:
     """Collapse duplicate (file, line) entries to their most informative message.
 
@@ -145,6 +184,7 @@ def parse_build_failures(build_tool: str, output: str) -> list[dict[str, Any]]:
     """Group a failed build's raw output into distinct, located issues."""
     if build_tool == "maven":
         raw = _parse_compile_errors(output, _MAVEN_ERROR_RE, _MAVEN_CONTINUATION_RE)
+        raw += _parse_maven_pom_validation_errors(output)
     else:
         raw = _parse_compile_errors(output, _GRADLE_ERROR_RE, _GRADLE_CONTINUATION_RE)
     raw += _parse_test_failures(output)

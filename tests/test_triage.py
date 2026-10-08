@@ -34,6 +34,23 @@ TEST_FAILURE_OUTPUT = """Tests in error:
 Tests run: 2, Failures: 0, Errors: 2, Skipped: 0
 """
 
+# Shape taken from a real failure: an OpenRewrite Spring Boot recipe stripped
+# an explicit <version> it assumed Boot's own BOM would supply, but doesn't.
+MAVEN_POM_VALIDATION_OUTPUT = """[ERROR] [ERROR] Some problems were encountered while processing the POMs:
+[ERROR] 'dependencies.dependency.version' for de.flapdoodle.embed:de.flapdoodle.embed.mongo:jar is missing. @ line 58, column 15
+[ERROR] 'dependencies.dependency.version' for de.flapdoodle.embed:de.flapdoodle.embed.mongo:jar is missing. @ line 78, column 15
+ @
+[ERROR] The build could not read 2 projects -> [Help 1]
+[ERROR]
+[ERROR]   The project com.example:auth-service:1.0-SNAPSHOT (/app/auth-service/pom.xml) has 1 error
+[ERROR]     'dependencies.dependency.version' for de.flapdoodle.embed:de.flapdoodle.embed.mongo:jar is missing. @ line 58, column 15
+[ERROR]
+[ERROR]   The project com.example:account-service:1.0-SNAPSHOT (/app/account-service/pom.xml) has 1 error
+[ERROR]     'dependencies.dependency.version' for de.flapdoodle.embed:de.flapdoodle.embed.mongo:jar is missing. @ line 78, column 15
+[ERROR]
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+"""
+
 
 class MavenParsingTests(unittest.TestCase):
     def test_known_patterns_are_matched_with_fix_text(self):
@@ -63,6 +80,26 @@ class MavenParsingTests(unittest.TestCase):
         issues = triage.parse_build_failures("maven", MAVEN_OUTPUT)
         counter_service = next(i for i in issues if i["category"] == "removed-api")
         self.assertEqual(counter_service["lines"], [9])
+
+
+class MavenPomValidationParsingTests(unittest.TestCase):
+    def test_each_affected_module_is_a_distinct_located_issue(self):
+        issues = triage.parse_build_failures("maven", MAVEN_POM_VALIDATION_OUTPUT)
+        self.assertEqual(len(issues), 2)
+        files = {i["file"] for i in issues}
+        self.assertEqual(files, {"/app/auth-service/pom.xml", "/app/account-service/pom.xml"})
+
+    def test_matched_as_the_known_pattern_with_fix_text(self):
+        issues = triage.parse_build_failures("maven", MAVEN_POM_VALIDATION_OUTPUT)
+        self.assertTrue(all(i["category"] == "missing-dependency-version" for i in issues))
+        self.assertTrue(all(i["recommended_fix"] for i in issues))
+        self.assertTrue(all(i["confidence"] == "high" for i in issues))
+
+    def test_line_numbers_are_correct_per_file(self):
+        issues = triage.parse_build_failures("maven", MAVEN_POM_VALIDATION_OUTPUT)
+        by_file = {i["file"]: i["lines"] for i in issues}
+        self.assertEqual(by_file["/app/auth-service/pom.xml"], [58])
+        self.assertEqual(by_file["/app/account-service/pom.xml"], [78])
 
 
 class GradleParsingTests(unittest.TestCase):

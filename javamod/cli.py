@@ -197,13 +197,19 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         residual_issues: list[dict] = []
         if build_ok is False:
             residual_issues = triage.parse_build_failures(build.tool, build_result.output)
-            if residual_issues:
-                if not args.quiet:
+            if not args.quiet:
+                if residual_issues:
                     triage.print_summary(residual_issues)
-                issues_destination = args.issues or str(workdir / "remaining-issues.yaml")
-                triage.write(residual_issues, issues_destination)
-                if not args.quiet and issues_destination != "-":
-                    print(f"\nfull triage written to {issues_destination}")
+                else:
+                    # No known pattern matched -- still show *something* rather
+                    # than nothing, especially since --execute raises right after
+                    # this and never reaches the full report/build-output print.
+                    print("\nbuild/test FAILED; no known issue pattern matched this failure. Last output:")
+                    print(build_result.output[-3000:])
+            issues_destination = args.issues or str(workdir / "remaining-issues.yaml")
+            triage.write(residual_issues, issues_destination)
+            if not args.quiet and issues_destination != "-":
+                print(f"\nfull triage written to {issues_destination}")
         if build_ok is False and args.execute and not args.force_push:
             raise ModError("build/tests failed after migration; not pushing (use --force-push to push anyway)")
 
