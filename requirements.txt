@@ -1,0 +1,5 @@
+# Core javamod needs nothing beyond the Python standard library and a
+# system `git`. These are optional, pay-as-you-need extras:
+
+anthropic>=0.40   # only used by --engine ai / --engine hybrid
+pytest>=8         # only used to run tests/
