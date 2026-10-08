@@ -43,6 +43,21 @@ class ProfileTests(unittest.TestCase):
 
 
 class SpringBootTests(unittest.TestCase):
+    def test_java_upgrade_preserves_legacy_boot_namespace(self):
+        for boot in (None, "2.7"):
+            plan = recipes.build_plan(build_root(features={"javax"}, spring_boot="2.3.0"),
+                                      target_java=21, boot=boot, profile="conservative")
+            self.assertFalse(any("JavaxMigrationToJakarta" in name for name in plan.recipe_names))
+
+    def test_explicit_boot3_upgrade_migrates_namespace(self):
+        plan = recipes.build_plan(build_root(features={"javax"}, spring_boot="2.7.18"),
+                                  target_java=21, boot="3.5", profile="conservative")
+        self.assertTrue(any("JavaxMigrationToJakarta" in name for name in plan.recipe_names))
+
+    def test_boot3_target_rejects_java11(self):
+        with self.assertRaisesRegex(ModError, "Java 17"):
+            recipes.build_plan(build_root(spring_boot="2.7.18"), target_java=11, boot="3.5", profile="standard")
+
     def test_boot_recipe_only_applied_when_spring_detected(self):
         plan = recipes.build_plan(build_root(spring_boot=None), target_java=21, boot="3.5", profile="standard")
         self.assertFalse(any("UpgradeSpringBoot" in n for n in plan.recipe_names))

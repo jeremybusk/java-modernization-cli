@@ -101,11 +101,17 @@ def build_plan(build: BuildRoot, *, target_java: int, boot: str | None, profile:
     if profile not in PROFILE_DEFAULTS:
         raise ModError(f"--profile must be one of {sorted(PROFILE_DEFAULTS)}, got {profile!r}")
     opts = PROFILE_DEFAULTS[profile]
+    boot_major = parse_boot_version(boot)[0] if boot and build.spring_boot else None
+    if boot_major is not None and boot_major >= 3 and target_java < 17:
+        raise ModError(f"Spring Boot {boot} requires Java 17 or newer")
     modules = {"migrate_java"}
     phases = [MigrationPhase("java-upgrade", (f"org.openrewrite.java.migrate.UpgradeToJava{target_java}",))]
 
     compatibility = []
-    if "javax" in build.features:
+    # Boot 1/2 still needs javax APIs. A Java-only upgrade must not silently
+    # migrate its framework namespace; that belongs to an explicit Boot 3+ upgrade.
+    spring = build.spring_boot is not None or "spring-boot" in build.features
+    if "javax" in build.features and (not spring or (boot_major is not None and boot_major >= 3)):
         compatibility.append("org.openrewrite.java.migrate.jakarta.JavaxMigrationToJakarta")
     if {"lombok", "mapstruct"} <= build.features:
         compatibility.append("org.openrewrite.java.migrate.AddLombokMapstructBinding")

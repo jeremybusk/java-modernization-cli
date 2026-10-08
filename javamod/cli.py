@@ -9,6 +9,8 @@ way against every repository.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import os
 import shutil
 import sys
 import tempfile
@@ -100,13 +102,24 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--agent-arg", action="append", default=[],
                           help="extra argument passed through to the agent CLI, repeatable (use --agent-arg=--flag)")
     migrate.add_argument("--agent-timeout", type=int, default=env_default("JAVAMOD_AGENT_TIMEOUT", 3600, int),
-                          help="seconds before the agent run is stopped (default: %(default)s)")
+                          help="seconds before each agent pass is stopped (default: %(default)s)")
+    migrate.add_argument("--agent-on", default=env_default("JAVAMOD_AGENT_ON", "always"), choices=("always", "failure"),
+                          help="always (default): run the agent after the recipes. failure: only if javamod's build "
+                               "check fails after them, saving an agent pass when the recipes were enough")
+    migrate.add_argument("--agent-retries", type=int, default=env_default("JAVAMOD_AGENT_RETRIES", 0, int),
+                          help="if javamod's own build check still fails after the agent, give the agent up to this "
+                               "many more passes with that failure output (default: %(default)s)")
 
     migrate.add_argument("--skip-build", action="store_true", help="skip compiling/testing the result")
     migrate.add_argument("--skip-format", action="store_true",
                           help="don't run the project's own formatter (spring-javaformat/Spotless) after migrating, "
                                "even if one is detected")
     migrate.add_argument("--skip-tests", action="store_true", help="compile only; don't run the test suite")
+    migrate.add_argument("--skip-test", action="append", metavar="CLASS",
+                          default=[t for t in env_default("JAVAMOD_SKIP_TESTS", "").split(",") if t],
+                          help="exclude this test class (simple or fully qualified name) from the build check, "
+                               "repeatable; for tests known to fail for reasons outside the migration, e.g. a "
+                               "live external service. Recorded in the report and commit message.")
     migrate.add_argument("--shallow", action="store_true", help="shallow-clone a remote source (loses history)")
     migrate.add_argument("--allow-dirty", action="store_true", help="allow a local source with uncommitted changes")
 
@@ -124,6 +137,9 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--issues", default=None,
                           help="if the build still fails, write the residual-issue triage YAML here, or '-' for "
                                "stdout; default: <workdir>/remaining-issues.yaml")
+    migrate.add_argument("--diff-stat-lines", type=int, default=env_default("JAVAMOD_DIFF_STAT_LINES", 25, int),
+                          help="max changed-file lines in the printed summary, 0 for all (the JSON report always "
+                               "has the full list; default: %(default)s)")
     migrate.add_argument("--quiet", action="store_true", help="suppress the human-readable summary (pairs with --report -)")
     migrate.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation before pushing")
     migrate.add_argument("-v", "--verbose", action="store_true")
@@ -154,18 +170,23 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _agent_pass(args: argparse.Namespace, repo: Path, prompt: str, log_path: Path, log) -> bool:
+    return agent.run(repo, prompt, agent_name=args.agent, model=args.agent_model, extra_args=args.agent_arg,
+                     timeout=args.agent_timeout, log_path=log_path, log=log)
+
+
 def cmd_migrate(args: argparse.Namespace) -> int:
-    if not args.local_only and not args.dest:
-        raise ModError("--dest is required unless --local-only is set")
     source, inline_ref = gitrepo.split_ref(args.source)
     ref = args.source_ref or inline_ref
-    log = (lambda msg: print(f"[javamod] {msg}")) if args.verbose else (lambda _msg: None)
+    log = (lambda msg: print(f"[javamod] {msg}", file=sys.stderr)) if args.verbose else (lambda _msg: None)
+    human_stream = sys.stderr if args.report == "-" or args.issues == "-" else sys.stdout
 
     persistent = args.workdir is not None
     workdir = (args.workdir or Path(tempfile.mkdtemp(prefix="javamod-"))).expanduser().resolve()
     workdir.mkdir(parents=True, exist_ok=True)
     push_token_env = _resolve_token_env(args)
     success = False
+    report = None
     try:
         log(f"cloning {source}" + (f"#{ref}" if ref else ""))
         src_path = gitrepo.clone_source(
@@ -178,12 +199,15 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         log(f"{build.tool} build at {build.path.relative_to(src_path)}"
             f" (current Java: {build.current_java or 'unknown'}, features: {sorted(build.features) or 'none detected'})")
         gitrepo.ignore_build_outputs(src_path, build.path, build.tool)
+        boot = args.boot if build.spring_boot else None
+        if args.boot and not boot and not args.quiet:
+            print(f"warning: --boot {args.boot} ignored: no Spring Boot detected in this build", file=sys.stderr)
 
         branch = args.dest_branch
         gitrepo.ensure_branch(src_path, branch)
 
         plan = recipes.build_plan(
-            build, target_java=args.java, boot=args.boot, profile=args.profile,
+            build, target_java=args.java, boot=boot, profile=args.profile,
             dependency_strategy=args.dependency_strategy, extra_recipes=tuple(args.recipe),
         )
         if args.engine in ("openrewrite", "hybrid"):
@@ -194,51 +218,86 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             )
         if args.engine == "ai":
             ai.modernize_tree(build, target_java=args.java, model=args.ai_model, max_files=args.ai_max_files, log=log)
-        agent_result = None
+        run_tests = not args.skip_tests
+        skip_tests = args.skip_test if run_tests else []
+        agent_skills: list[str] = []
+        agent_passes: list[bool] = []
+        agent_log = None
         if args.agent:
-            agent_result = agent.run(
-                build, src_path, plan.recipe_names if args.engine != "ai" else [], agent_name=args.agent,
-                skills=args.agent_skill, target_java=args.java, boot=args.boot, run_tests=not args.skip_tests,
-                model=args.agent_model, extra_args=args.agent_arg, timeout=args.agent_timeout,
-                workdir=workdir, log=log,
-                # Outlives a temp workdir that's deleted on success: the
-                # transcript is what you review an agent run by.
-                log_path=workdir / "agent-transcript.log" if persistent or args.keep
-                else Path(tempfile.mkstemp(prefix="javamod-agent-", suffix=".log")[1]),
+            # Outlives a temp workdir that's deleted on success: the
+            # transcript is what you review an agent run by.
+            if persistent or args.keep:
+                agent_log = workdir / "agent-transcript.log"
+            else:
+                handle, name = tempfile.mkstemp(prefix="javamod-agent-", suffix=".log")
+                os.close(handle)
+                agent_log = Path(name)
+            agent_skills = agent.install(src_path, args.agent, args.agent_skill, workdir / "agent-skills", log=log)
+
+        def first_prompt(failure: str | None = None) -> str:
+            return agent.build_prompt(
+                build, src_path, plan.recipe_names if args.engine != "ai" else [], target_java=args.java,
+                boot=boot, skills=agent_skills, run_tests=run_tests, skip_tests=skip_tests, failure=failure,
             )
+        if args.agent and args.agent_on == "always":
+            agent_passes.append(_agent_pass(args, src_path, first_prompt(), agent_log, log))
         if not args.skip_format:
             formatting.reconcile(build, log=log)
 
         build_result = None
         if not args.skip_build:
-            build_result = buildcheck.validate(build, run_tests=not args.skip_tests)
+            build_result = buildcheck.validate(build, run_tests=run_tests, skip_tests=skip_tests)
             if not build_result.ok and args.engine == "hybrid":
                 build_result = ai.fix_build(
                     build, build_result, model=args.ai_model, max_iterations=args.ai_max_iterations,
-                    run_tests=not args.skip_tests, log=log,
+                    run_tests=run_tests, skip_tests=skip_tests, log=log,
                 )
+                if not args.skip_format and formatting.reconcile(build, log=log):
+                    build_result = buildcheck.validate(build, run_tests=run_tests, skip_tests=skip_tests)
+            # Each pass here hands the agent javamod's own failure, not its
+            # own view of the build, and javamod re-checks -- the agent never
+            # gets to declare the build fixed. With --agent-on failure the
+            # first pass happens here too, and only if the recipes fell short.
+            remaining = (args.agent_retries + (args.agent_on == "failure")) if args.agent else 0
+            for attempt in range(1, remaining + 1):
+                if build_result.ok:
+                    break
+                failure = buildcheck.condense(build.tool, build_result.output)
+                if agent_passes:
+                    log(f"agent: build check failed; retry {len(agent_passes)}/{args.agent_retries}")
+                    prompt = agent.retry_prompt(build, src_path, failure=failure, attempt=len(agent_passes),
+                                                skills=agent_skills, skip_tests=skip_tests)
+                else:
+                    log("agent: build check failed after the recipes; running the agent")
+                    prompt = first_prompt(failure)
+                agent_passes.append(_agent_pass(args, src_path, prompt, agent_log, log))
+                if not args.skip_format:
+                    formatting.reconcile(build, log=log)
+                build_result = buildcheck.validate(build, run_tests=run_tests, skip_tests=skip_tests)
 
-        message = f"javamod: modernize to Java {args.java}" + (f", Spring Boot {args.boot}" if args.boot else "")
+        message = f"javamod: modernize to Java {args.java}" + (f", Spring Boot {boot}" if boot else "")
+        if skip_tests:
+            message += "\n\nTests excluded from javamod's build check: " + ", ".join(skip_tests)
         commit = gitrepo.commit_all(src_path, message)
         changed = commit is not None
         diff_stat = gitrepo.diff_stat_since(src_path, base_rev) if changed else ""
         build_ok = build_result.ok if build_result else None
         residual_issues: list[dict] = []
+        build_log = None
         if build_ok is False:
             residual_issues = triage.parse_build_failures(build.tool, build_result.output)
-            if not args.quiet:
-                if residual_issues:
+            # The full log goes to a file; the summary below shows only the
+            # condensed failure (both report paths print it, so a failure is
+            # never silent even when --execute blocks the push).
+            build_log = workdir / "build-output.log"
+            build_log.write_text(build_result.output, encoding="utf-8")
+            if not args.quiet and residual_issues:
+                with contextlib.redirect_stdout(human_stream):
                     triage.print_summary(residual_issues)
-                else:
-                    # No known pattern matched -- still show *something* rather
-                    # than nothing, especially since --execute raises right after
-                    # this and never reaches the full report/build-output print.
-                    print("\nbuild/test FAILED; no known issue pattern matched this failure. Last output:")
-                    print(build_result.output[-3000:])
             issues_destination = args.issues or str(workdir / "remaining-issues.yaml")
             triage.write(residual_issues, issues_destination)
             if not args.quiet and issues_destination != "-":
-                print(f"\nfull triage written to {issues_destination}")
+                print(f"\nfull triage written to {issues_destination}", file=human_stream)
         # Built now, before any raise below, so --report still gets written on
         # a failure that blocks the push -- that's precisely when a CI
         # consumer most needs the structured build_ok/residual_issues fields,
@@ -246,73 +305,98 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         report = RunReport(
             source=source, source_ref=ref, build_tool=build.tool,
             build_root=str(build.path.relative_to(src_path)), target_java=args.java,
-            boot_target=args.boot, profile=args.profile, engine=args.engine, recipes=plan.recipe_names,
+            boot_target=boot, profile=args.profile, engine=args.engine,
+            recipes=plan.recipe_names if args.engine != "ai" else [],
             changed=changed, diff_stat=diff_stat, build_ok=build_ok,
-            build_output_tail=build_result.output if build_result else "", commit=commit, branch=branch,
+            build_output_tail=buildcheck.condense(build.tool, build_result.output) if build_ok is False else "",
+            commit=commit, branch=branch,
             destination=args.dest, pushed=False, residual_issues=residual_issues,
-            agent=args.agent, agent_ok=agent_result.ok if agent_result else None,
-            agent_skills=agent_result.skills if agent_result else [],
-            agent_log=str(agent_result.log_path) if agent_result else None,
+            build_log=str(build_log) if build_log else None, skipped_tests=skip_tests,
+            agent=args.agent, agent_ok=all(agent_passes) if agent_passes else None,
+            agent_passes=len(agent_passes), agent_skills=agent_skills,
+            agent_log=str(agent_log) if agent_log else None,
         )
 
-        if build_ok is False and args.execute and not args.force_push:
-            if not args.quiet:
-                report.print_summary()
-            if args.report:
-                report.write_json(args.report)
+        if build_ok is False and args.execute and not args.local_only and not args.force_push:
             raise ModError("build/tests failed after migration; not pushing (use --force-push to push anyway)")
 
-        pushed = False
         if args.execute and not args.local_only:
             if not args.yes and sys.stdin.isatty():
-                reply = input(f"Push branch '{branch}' to {args.dest}? [y/N] ")
+                print(f"Push branch '{branch}' to {args.dest}? [y/N] ", end="", file=sys.stderr, flush=True)
+                reply = input()
                 if reply.strip().lower() not in {"y", "yes"}:
                     raise ModError("push cancelled")
             log(f"pushing {branch} -> {args.dest}")
+            if args.init_dest and not gitrepo.is_remote(args.dest):
+                gitrepo.init_bare_destination(Path(args.dest).expanduser().resolve())
             gitrepo.push(src_path, branch, args.dest, token_env=push_token_env, force=args.force_push)
-            pushed = True
-        report.pushed = pushed
-
-        if not args.quiet:
-            report.print_summary()
-            if not pushed:
-                print(f"local checkout: {src_path}")
-        if args.report:
-            report.write_json(args.report)
+            report.pushed = True
         success = build_ok is not False
         return 0 if success else 1
-    except ModError as exc:
+    except (ModError, OSError) as exc:
+        if report is not None:
+            report.error = str(exc)
         print(f"error: {exc}", file=sys.stderr)
         return 2
     finally:
-        if success and not persistent and not args.keep:
+        cleanup = success and report is not None and report.pushed and not persistent and not args.keep
+        if report is not None:
+            report.local_checkout = None if cleanup else str(workdir / "src")
+            if not args.quiet:
+                with contextlib.redirect_stdout(human_stream):
+                    report.print_summary(diff_stat_lines=args.diff_stat_lines)
+            if args.report:
+                report.write_json(args.report)
+        if cleanup:
             shutil.rmtree(workdir, ignore_errors=True)
         elif not success:
             print(f"workdir kept for inspection: {workdir}", file=sys.stderr)
 
 
+def _validate_migrate(args: argparse.Namespace) -> None:
+    # argparse validates explicit choices, but not environment-supplied defaults.
+    choices = {
+        "java": recipes.TARGET_JAVA_VERSIONS, "profile": recipes.PROFILE_DEFAULTS,
+        "dependency_strategy": ("patch", "latest"), "recipe_source": recipes.PLUGIN_VERSIONS,
+        "engine": ("openrewrite", "hybrid", "ai"), "agent": agent.AGENTS,
+        "agent_on": ("always", "failure"), "provider": ("github", "gitlab"),
+    }
+    for name, allowed in choices.items():
+        value = getattr(args, name)
+        if value is not None and value not in allowed:
+            raise ModError(f"--{name.replace('_', '-')} must be one of {', '.join(map(str, allowed))}")
+    for name, minimum in (("ai_max_iterations", 0), ("ai_max_files", 1), ("agent_timeout", 1),
+                          ("agent_retries", 0), ("diff_stat_lines", 0)):
+        if getattr(args, name) < minimum:
+            raise ModError(f"--{name.replace('_', '-')} must be at least {minimum}")
+    if not args.local_only and not args.dest:
+        raise ModError("--dest is required unless --local-only is set")
+    if args.recipe_source == "codegenome" and not args.allow_codegenome:
+        raise ModError("--recipe-source codegenome also requires --allow-codegenome")
+    if (args.agent_skill or args.agent_retries) and not args.agent:
+        raise ModError("--agent-skill and --agent-retries need --agent")
+    if args.agent and args.agent_on == "failure" and args.skip_build:
+        raise ModError("--agent-on failure needs the build check; drop --skip-build")
+    if args.report == "-" and args.issues == "-":
+        # Both on stdout would interleave YAML and JSON; the report already
+        # carries the same issues as its residual_issues field.
+        raise ModError("--report - and --issues - can't both use stdout; the report already includes the issues "
+                       "as residual_issues")
+    if args.dest_branch.startswith("-") or args.dest_branch == "HEAD":
+        raise ModError(f"invalid destination branch: {args.dest_branch!r}")
+    gitrepo.run(["git", "check-ref-format", f"refs/heads/{args.dest_branch}"], cwd=Path.cwd())
+    if args.agent:
+        agent.cli_for(args.agent)  # fail before cloning, not after the recipes
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.command == "doctor":
-        return cmd_doctor(args)
-    if args.command == "migrate" and args.recipe_source == "codegenome" and not args.allow_codegenome:
-        print("error: --recipe-source codegenome also requires --allow-codegenome", file=sys.stderr)
-        return 2
-    if args.command == "migrate" and args.agent_skill and not args.agent:
-        print("error: --agent-skill needs --agent", file=sys.stderr)
-        return 2
-    if args.command == "migrate" and args.agent:
-        try:
-            agent.cli_for(args.agent)  # fail before cloning, not after the recipes
-        except ModError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-    if args.command == "migrate" and args.init_dest and args.dest and not gitrepo.is_remote(args.dest):
-        gitrepo.init_bare_destination(Path(args.dest).expanduser().resolve())
     try:
+        args = build_parser().parse_args(argv)
+        if args.command == "doctor":
+            return cmd_doctor(args)
+        _validate_migrate(args)
         return cmd_migrate(args)
-    except ModError as exc:
+    except (ModError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

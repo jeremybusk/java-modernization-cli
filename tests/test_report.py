@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from javamod import report
 from javamod.report import RunReport
 
 
@@ -34,6 +35,21 @@ class WriteJsonDestinationTests(unittest.TestCase):
             make_report().write_json(str(path))
             payload = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(payload["branch"], "modernize-java21")
+
+
+class DiffStatCapTests(unittest.TestCase):
+    STAT = "\n".join([f" f{i}.java | 2 +-" for i in range(30)] + [" 30 files changed, 30 insertions(+), 30 deletions(-)"])
+
+    def test_caps_file_lines_and_keeps_totals(self):
+        capped = report._cap_diff_stat(self.STAT, 25)
+        self.assertEqual(len(capped.splitlines()), 27)
+        self.assertIn("... 5 more file(s)", capped)
+        self.assertTrue(capped.endswith("30 deletions(-)"))
+
+    def test_zero_or_short_lists_are_unchanged(self):
+        self.assertEqual(report._cap_diff_stat("", 25), "")
+        self.assertEqual(report._cap_diff_stat(self.STAT, 0), self.STAT)
+        self.assertEqual(report._cap_diff_stat(self.STAT, 30), self.STAT)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 from . import recipes as R
@@ -154,8 +155,7 @@ def run(build: BuildRoot, plan: R.Plan, *, recipe_source: str, allow_codegenome:
         return False
     artifacts = R.resolve_artifacts(plan.modules, recipe_source, allow_codegenome)
     plugin_version = R.PLUGIN_VERSIONS[recipe_source][build.tool]
-    workdir = build.path / ".javamod-openrewrite"
-    workdir.mkdir(exist_ok=True)
+    workdir = Path(tempfile.mkdtemp(prefix=".javamod-openrewrite-", dir=build.path))
     try:
         recipe_name = _write_recipe_file(workdir / "recipe.yml", plan.phases)
         local_repo = ensure_source_recipes_built(plan.modules, log) if recipe_source == "source" else None
